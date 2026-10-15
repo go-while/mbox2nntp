@@ -474,6 +474,14 @@ three nils. The worker sees `cerr == nil`, breaks out of `loop_CB`, and derefere
   split on `"\n"`. For a multi-million-file spool this is hundreds of MB resident before
   any work starts, and filenames containing newlines break the split. Replace with
   `filepath.WalkDir`, which also removes the external script dependency.
+- **7z extraction is never cleaned up** *(FIXED)*. `proc()` returned the extracted file's
+  name only for `is_zip || is_gzp`. For a `.mbox.7z` it returned the archive name instead,
+  so `main`'s cleanup looked for the wrong file, and the extracted mbox stayed behind
+  after the archive was moved to `.done`. Found on
+  `FULL-USENET-BACKUP-2020-Oct-0.akita-inu.1825.mbox.7z`: 53 MB left behind per archive.
+- **`mboxhasZ` moves `.zip` for a `.7z`** *(FIXED)*. Copy-paste: `if has_zip7 {
+  mvmbox(zip) }`. For a plain `.mbox` with its `.7z` beside it, `mv` fails on the missing
+  `.zip` and `mvmbox` exits 1 at the end of an otherwise complete run.
 
 ---
 

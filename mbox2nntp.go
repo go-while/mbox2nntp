@@ -361,7 +361,7 @@ func mboxhasZ(mboxfile string) bool {
 		}
 
 		if has_zip7 {
-			mvmbox(zip)
+			mvmbox(zip7)
 		}
 
 		//rmmbox(mboxfile)
@@ -1045,13 +1045,15 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		globalBools.SetGB("process", true)
 		globalBools.SetGB("feeder_done", true)
 		globalBools.SetGB("done", true)
-		if (is_zip || is_gzp){
+		if (is_zip || is_zip7 || is_gzp){
 			return mboxfiletrim
 		}
 		return mboxfile
 	}
 
-	if (is_zip || is_gzp){
+	// archives return the extracted file's name: main removes it after
+	// moving the archive to .done
+	if (is_zip || is_zip7 || is_gzp){
 		iterateMbox(reader,src,mboxfiletrim)
 		return mboxfiletrim
 	}
