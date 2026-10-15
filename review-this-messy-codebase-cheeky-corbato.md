@@ -41,7 +41,15 @@ and gna-clari unchanged.
 was appended to the header before it (`Approved`, `Bytes`, `Path`, …). It is fixed; see E
 for whether the server stored or rejected them.
 
-Still open: **A4, B4–B5, rest of H, I3, J1–J2, J5–J6**.
+**The remaining items are closed.**
+- B5, H, I3, J5 and J6 are fixed.
+- A4 and B4 are closed by measuring the corpus. No archive here is mbox-escaped, and no
+  article lacks `Date:`, so a change in either would have repaired nothing and risked
+  damage.
+- J1–J2 were analysis with no action: the allowlist stays.
+
+Nothing is open in the code. Operationally, re-feed the B6 and E1 files with the fixed build
+(see B6 and E).
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -177,7 +185,7 @@ no change, because `textproto.ReadDotLines` already strips CRLF.
 unless `.nodos2unix` is present. Before, a missing `dos2unix` failed only after the unzip,
 and left the extracted file behind.
 
-### A4. mboxrd `>From ` escaping is never reversed
+### A4. mboxrd `>From ` escaping is never reversed  *(CLOSED — measured: none of these archives is escaped)*
 The library documents this explicitly (`go-lib-mbox2nntp/doc.go`): it "will not reverse
 any >From-escaping". `iterateMbox` does not either, so every mboxrd-sourced body line that
 originally began with `From ` was stored as `>From `.
@@ -185,6 +193,34 @@ originally began with `From ` was stored as `>From `.
 **Fix:** decide per-source. Practical heuristic: on the mbox path, strip one leading `>`
 from lines matching `^>*From `. Gate it behind a flag, since mboxo sources must not be
 un-escaped.
+
+**Measured, then closed without a code change: nothing here was escaped, so nothing may
+be un-escaped.** Body lines matching `^>*From `, counted once per Message-ID across all four
+sources:
+
+| source | `From ` (unescaped) | `>From ` | `>>From ` |
+|---|---|---|---|
+| usenet-clari | 579 | 343 | 0 |
+| gna-clari | 0 | 147 | 2 |
+| akita (gz + 7z) | 0 | 44 | 0 |
+
+- **usenet-clari** does no escaping at all. Its 579 unescaped lines are the prose
+  near-misses from J4 (`From Table 1 ...`), which `validid` correctly leaves in the body.
+- **gna-clari:** 68 Message-IDs carry such lines in both collections, and **all 68 are
+  byte-identical**. mboxrd would have turned their `>From` into `>>From`. Apart from the
+  "`>From PayPal:`" chain letter, gna-clari has just two `>From` lines. One,
+  `>From Al Pacino to Woody Allen ...`, is also in usenet-clari, which escapes nothing,
+  so the `>` was in the article as posted. A mail gateway quoted it before it ever
+  reached Usenet.
+- **akita:** the 44 are chain-letter lines (`>From your Paypal account ...`,
+  `>From time to time ...`) and quoting (`>From Marc Balinsky`): article text, not mbox
+  escaping.
+
+So stripping a `>` would corrupt real article text in every collection measured. The
+importer keeps sending body lines exactly as stored, as the library's `doc.go` says. Before
+importing a new collection, rerun the count. A collection that escapes shows no unescaped
+`From ` body lines and `>>From` lines in proportion. If one turns up, this is where its
+flag goes.
 
 ---
 
@@ -1027,10 +1063,10 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 2. **B2, B3, D1, D2, D3** — NNTP session correctness.  *(DONE — via a deadline-setting
    connection wrapper rather than threading the `net.Conn` through)*
 3. **F** — path and cleanup fixes; switch to `filepath.Join`/`filepath.Base`, replace
-   `find.sh` with `filepath.WalkDir`, add `--` to the exec calls.
+   `find.sh` with `filepath.WalkDir`, add `--` to the exec calls.  *(DONE)*
 4. **H** — unblock the build (`go-utils`), then `gofmt`, `go vet` clean, dead-code
-   deletion, `flag`-based arguments.  *(build and vet DONE; gofmt, dead code and `flag`
-   still open)*
+   deletion, `flag`-based arguments.  *(DONE — arguments kept positional and documented
+   instead of `flag`, so existing command lines still work)*
 5. **I2** — repair `mbox_test.go` so the library has a working test suite again. Do this
    *before* touching `validid`: it is the reason the regex could never be changed safely.
    *(DONE)*
@@ -1041,7 +1077,8 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
    stuck-loop guard and empty-file handling in the importer.  *(DONE — re-feed the
    affected files; see B6)*
 9. **G, E, J5–J6, A4, B4, B5** — throughput, header handling, regex naming, and the
-   optional `>From ` / missing-`Date:` repair work.
+   optional `>From ` / missing-`Date:` repair work.  *(DONE — A4 and B4 closed by
+   measurement, no change needed)*
 
 ## Verification
 
