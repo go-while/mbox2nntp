@@ -29,7 +29,7 @@ import (
 	"github.com/go-while/go-utils"
 	"github.com/go-while/go-lib-mbox2nntp"
 	"github.com/go-while/nntp-overview"
-	"tsm/GlobalBools" // "github.com/go-while/go-GlobalBools"
+	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
 	//"nntp/data/overview"
 )
 
