@@ -38,7 +38,10 @@ import (
 
 const (
 	DEBUG bool = false
-	WORKER_CHAN_SIZE int = 1000000 // queue this many articles
+	// queue this many articles. Workers are network-bound and the parser is
+	// not, so a big queue only fills up: at 1,000,000 a single 73k-article
+	// archive reached 2.7 GB resident. A few thousand covers any jitter.
+	WORKER_CHAN_SIZE int = 4096
 	CRLF string = "\r\n"
 	DOT string = "."
 )
@@ -77,7 +80,6 @@ var (
 	globalBools             tsm_GlobalBools.GlobalBools
 	globalCounter           GlobalCounter
 	worker_channel          chan *ArticleItem
-	requeue_channel         chan *ArticleItem
 	notify_chan             chan struct{}
 	regex_isAlphaNumStart   = regexp2.MustCompile(`^[A-Za-z0-9]`, 0)
 	regex_isbaddateline   = regexp2.MustCompile(`^[A-Z][a-z][a-z],\ `, 0)
@@ -236,7 +238,7 @@ func connectBackend(rserver string) (*textproto.Conn, *bufio.Writer, error) {
 
 	dconn := &deadlineConn{Conn: conn, timeout: NNTP_TIMEOUT}
 	srvtp := textproto.NewConn(dconn)
-	CliWriter := bufio.NewWriter(dconn)
+	CliWriter := bufio.NewWriterSize(dconn, 64*1024) // an article in one or two writes
 	code, msg, err := srvtp.ReadCodeLine(20)
 
 	if code != 200 && code != 201 {
@@ -785,11 +787,6 @@ func read_file(file_path string) string {
 		log.Printf(":: retlines=%d", len(retlines))
 	}
 	*/
-	queued := len(worker_channel)
-	markhi := WORKER_CHAN_SIZE/10
-	if queued > markhi {
-		globalBools.SetGB("process", true)
-	}
 	globalCounter.incCounter(0, "msgnums")
 	worker_channel <- &ArticleItem{msgid: msgid, head: header, body: body}
 	return msgid
@@ -823,7 +820,6 @@ func main() {
 	globalBools = tsm_GlobalBools.GlobalBools{V: make(map[string]bool)}
 	globalCounter = GlobalCounter{v: make(map[string]int)}
 	worker_channel = make(chan *ArticleItem, WORKER_CHAN_SIZE)
-	requeue_channel = make(chan *ArticleItem, WORKER_CHAN_SIZE)
 	notify_chan = make(chan struct{}, 1)
 	globalCounter.initCounter("worker_done")
 
@@ -1163,7 +1159,6 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		if werr != nil {
 			log.Printf("ERROR dir walk '%s': %v", mboxfile, werr)
 		}
-		globalBools.SetGB("process", true)
 		globalBools.SetGB("feeder_done", true)
 		log.Printf("mbox2nntp done is_dir reading totalfiles=%d badfiles=%d", totf, badfiles)
 		//close(worker_channel)
@@ -1177,7 +1172,6 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 
 	if reader == nil {
 		// empty mbox: done, so it is moved aside like any finished file
-		globalBools.SetGB("process", true)
 		globalBools.SetGB("feeder_done", true)
 		globalBools.SetGB("done", true)
 		if (is_zip || is_zip7 || is_gzp){
@@ -1244,7 +1238,8 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 		fh.Close()
 		return nil, nil
 	}
-	src := &eofReader{r: bufio.NewReaderSize(fh, 1024*1024*1024)}
+	// was 1 GiB, allocated per file and filled on any mbox that large
+	src := &eofReader{r: bufio.NewReaderSize(fh, 1024*1024)}
 	mboxReader, err := mbox.CreateMboxStream(src)
 	if err != nil {
 		log.Printf("Can't create mbox reader: %#v", err)
@@ -1304,7 +1299,6 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	var lastReadErr, prevErr error
 	stoppedEarly := false
 	//msgidmap := make(map[string]int)
-	process := false
 	for {
 		//var message *Message
 		//lines := make([]string, 0)
@@ -1385,7 +1379,6 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 
 		if msgid != "" { err = nil }
-		globalBools.SetGB("process", true)
 
 		if msgid == "" || err != nil || isbinary {
 
@@ -1401,26 +1394,11 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 		//log.Printf("worker_channel <- msgid='%s' head=%d body=%d", msgid, len(head), len(body))
 
-		queued := len(worker_channel)
-		markhi := WORKER_CHAN_SIZE/100
-		if markhi < 100 {
-			markhi = 100
-		}
-		//marklo := WORKER_CHAN_SIZE/100*30
-		if !process && queued > markhi {
-			globalBools.SetGB("process", true)
-			//time.Sleep(1 * time.Second)
-			process = true
-		}
 		// TODO clear msgidhashdb
 		globalCounter.incCounter(0, "msgnums")
 		worker_channel <- &ArticleItem{msgid: msgid, head: head, body: body}
 
 	} // end for
-	if !process {
-		process = true
-		globalBools.SetGB("process", process)
-	}
 	//globalCounter.setCounter("msgnums", msgNumber)
 	//log.Printf("msgs=%d sent=%d errcnt=%d duplicate=%d rejected=%d", msgNumber, sentcnt, errcnt, nntpdup435, nntp437)
 	if !stoppedEarly {
@@ -1479,18 +1457,6 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 func worker(wid int) {
 	//debug := false
 
-	wait_for_process:
-	for {
-		if !globalBools.GetGB("process") {
-			//log.Printf("Sleep Worker %d", wid)
-			time.Sleep(100 * time.Millisecond)
-			continue wait_for_process
-		} else {
-			//log.Printf("PROCESS Worker %d", wid)
-			break wait_for_process
-		}
-	}
-
 	log.Printf("Launch Worker %d", wid)
 
 	var srvtp *textproto.Conn
@@ -1518,8 +1484,8 @@ func worker(wid int) {
 	code := 0
 	wcnt, wtot := 0, 0
 	werrcnt, wnntp999, wnntp437, wnntpdup435, wsentcnt := 0, 0, 0, 0, 0
-	doneTicker := time.NewTimer(time.Second/10)
-	//defer doneTicker.Stop()
+	doneTicker := time.NewTicker(time.Second/10)
+	defer doneTicker.Stop()
 	loop_worker:
 	for {
 		select {
@@ -1531,8 +1497,6 @@ func worker(wid int) {
 						break loop_worker
 					}
 				}
-				//log.Printf("Worker %d) doneTicker: todo msgnums=%d feeder_done=%t", wid, msgnums, feeder_done)
-				doneTicker = time.NewTimer(time.Second/10)
 				continue loop_worker
 
 			case article := <- worker_channel:
@@ -1597,7 +1561,7 @@ func worker(wid int) {
 				if wcnt >= 1000 {
 					//globalCounter.subCounter(wid, "msgnums", 1000)
 					msgnums := globalCounter.getCounter("msgnums")
-					log.Printf("Worker %d) wtot=%d wq=%d rq=%d dup=%d e437=%d err=%d sent=%d ttodo=%d", wid, wtot, len(worker_channel), len(requeue_channel), wnntpdup435, wnntp437, werrcnt, wsentcnt, msgnums)
+					log.Printf("Worker %d) wtot=%d wq=%d dup=%d e437=%d err=%d sent=%d ttodo=%d", wid, wtot, len(worker_channel), wnntpdup435, wnntp437, werrcnt, wsentcnt, msgnums)
 					wcnt = 0
 				}
 				//if debug {

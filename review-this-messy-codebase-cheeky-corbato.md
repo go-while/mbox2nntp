@@ -567,7 +567,7 @@ End to end, with a separate tmpdir and the archive in another directory:
 
 ## G. Resource / throughput
 
-- **`WORKER_CHAN_SIZE = 1000000`** (`mbox2nntp.go:38`) with two channels of that size
+- *(FIXED)* **`WORKER_CHAN_SIZE = 1000000`** (`mbox2nntp.go:38`) with two channels of that size
   (`worker_channel`, `requeue_channel`). Workers do not start until `process` is set, which
   for the mbox path requires 10 000 queued items (`mbox2nntp.go:1200`) and for the directory
   path 100 000 (`mbox2nntp.go:630`). Until then the feeder fills the queue alone, holding up
@@ -575,18 +575,38 @@ End to end, with a separate tmpdir and the archive in another directory:
   that is ~4 GB. `requeue_channel` is allocated and **never used** except in a log line.
   **Fix:** reduce the queue to a few thousand, start workers immediately (delete the
   `process` gate), and delete `requeue_channel`.
-- **`bufio.NewWriter(conn)`** (`mbox2nntp.go:209`) uses the 4 KB default, so a typical
+- *(FIXED)* **`bufio.NewWriter(conn)`** (`mbox2nntp.go:209`) uses the 4 KB default, so a typical
   article causes several small writes. A 64 KB writer measurably improves TB-scale throughput.
-- **`bufio.NewReaderSize(fh, 1024*1024*1024)`** (`mbox2nntp.go:1055`) allocates a **1 GiB**
+- *(FIXED)* **`bufio.NewReaderSize(fh, 1024*1024*1024)`** (`mbox2nntp.go:1055`) allocates a **1 GiB**
   read buffer per mbox file. 1–4 MB is ample.
-- **`go-lib-mbox2nntp/message.go`** runs `validid.MatchString` (a `regexp2` backtracking
+- *(FIXED as J3)* **`go-lib-mbox2nntp/message.go`** runs `validid.MatchString` (a `regexp2` backtracking
   match) against **every body line** to detect the next `From ` separator. This is the
   hottest path in the whole importer. Replace with a `bytes.HasPrefix(prefetch, []byte("From "))`
   pre-check before falling back to the regex.
-- **`doneTicker`** (`mbox2nntp.go:1309`, `1323`) is replaced with a fresh `time.NewTimer`
+- *(FIXED)* **`doneTicker`** (`mbox2nntp.go:1309`, `1323`) is replaced with a fresh `time.NewTimer`
   and never `Stop()`ed. Use a single `time.Ticker`.
-- **`GlobalCounter`** serializes every worker's per-article increment on one mutex. Switch
-  the hot counters (`msgnums`, `sent`) to `atomic.Int64`.
+- *(NOT DONE — not worth it)* **`GlobalCounter`** serializes every worker's per-article
+  increment on one mutex. Switch the hot counters (`msgnums`, `sent`) to `atomic.Int64`.
+  On reflection: that is one uncontended lock (~20 ns) per article, next to an IHAVE round
+  trip per article, which takes milliseconds. There is nothing to gain.
+
+**Applied:**
+
+- The queue is now 4,096, workers start immediately (the `process` gate is gone), and
+  `requeue_channel` is deleted.
+- The NNTP writer is 64 KB and the mbox read buffer is 1 MB.
+- `doneTicker` is a single `time.Ticker`.
+
+Measured on `gna-clari/clari.web.news.briefs.mbox.gz` (73,332 articles), 4 workers, fake
+IHAVE server:
+
+| | peak RSS | wall | articles |
+|---|---|---|---|
+| before | 2,646 MB | 43.5 s | 73,332 |
+| after | 121 MB | 43.9 s | 73,332, identical set |
+
+Wall time is bound by the fake server, so this does not show what the 64 KB writer does
+against a real INN.
 
 ---
 

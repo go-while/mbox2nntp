@@ -510,13 +510,11 @@ func setupWorker(t *testing.T, addr string) {
 	globalBools.V = make(map[string]bool)
 	globalCounter = GlobalCounter{v: make(map[string]int)}
 	worker_channel = make(chan *ArticleItem, 10)
-	requeue_channel = make(chan *ArticleItem, 10)
 	saved := nntpserv
 	nntpserv = addr
 	t.Cleanup(func() { nntpserv = saved })
 	worker_channel <- &ArticleItem{msgid: "<session@test>", head: testArticleHead, body: []string{"body"}}
 	globalCounter.setCounter("msgnums", 1)
-	globalBools.SetGB("process", true)
 	globalBools.SetGB("feeder_done", true)
 }
 
