@@ -25,7 +25,11 @@ undocumented behaviour changes (header-less messages are now accepted; a leading
 `: value-line` is salvaged as `X-Unknown:`), and it now carries a table test pinning every
 separator shape `validid` accepts or rejects, which is the missing safety net for section J.
 
-Still open: **A4, B2–B5, D, E, F, G, rest of H, I3, J**.
+**J3 is applied**: `validid` now sits behind a byte-prefix gate at both call sites,
+measured at ~76× on ordinary body lines with the per-line allocation gone, and guarded by
+a differential test.
+
+Still open: **A4, B2–B5, D, E, F, G, rest of H, I3, J1–J2 and J4–J6**.
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -505,10 +509,10 @@ upstream.
   always yields at least `"\n"`, and returns early otherwise, so `len(prefetch) == 0`
   never holds. Worth tidying for symmetry, not a live panic.
 
-- **`> 5` → `> 6` in `bodyReader.Read`.** Upstream's `len(prefetch) > 5` existed to make
-  `prefetch[0:5]` safe. The fork removed the slice but kept a magic minimum and bumped it
-  by one. No separator shape is ≤ 6 bytes so nothing breaks, but the constant is now
-  meaningless — replace it with the prefix gate in J3.
+- **`> 5` → `> 6` in `bodyReader.Read`.**  *(FIXED)* Upstream's `len(prefetch) > 5` existed
+  to make `prefetch[0:5]` safe. The fork removed the slice but kept a magic minimum and
+  bumped it by one. No separator shape is ≤ 6 bytes so nothing broke, but the constant was
+  meaningless — replaced by the prefix gate in J3.
 
 ### I3. Still open (present in both, not a regression)
 
@@ -566,7 +570,7 @@ Mon Sep  1 12:00:00 2003`, `From mailer-daemon ...`, `From 1234567` (the pattern
 `From MAILER-DAEMON I got this bounce:` / `From nobody Thu 3 people replied` *do* match and
 would split. None occur in this corpus; they matter for the next collection.
 
-### J3. Gate the regex behind a byte-prefix check — 112× on the hot path
+### J3. Gate the regex behind a byte-prefix check  *(FIXED)*
 
 Every alternative is anchored to `^From ` or `^#! rnews `, so
 
@@ -577,15 +581,36 @@ func couldBeSep(p []byte) bool {
 ```
 
 cannot hide a match (asserted by a test over all six branch shapes, and by a
-`gate_hid_a_match=0` counter over all 9.1M corpus lines). That assertion now lives in the
-repo as `TestValididPrefixGate` in `go-lib-mbox2nntp/mbox_test.go`, so the precondition is
-checked on every `go test` rather than being a claim in this document. Measured:
+`gate_hid_a_match=0` counter over all 9.1M corpus lines).
 
-| | ns/op |
-|---|---|
-| regex per body line (current) | 1618 |
-| gated, ordinary body line | 14.5 |
-| gated, actual separator | 866 |
+Applied as `couldBeSep` in `mbox.go`, used at both call sites — `extractSendingAddress`
+and `bodyReader.Read`. It also retires the `len(prefetch) > 6` magic constant noted in I2:
+the shortest string `validid` can accept is `#! rnews 1` at 10 bytes, so that bound never
+excluded a match, and `TestValididMinimumMatchLength` now checks it.
+
+Measured in-repo, `-benchtime=1s -count=6`, same `[]byte` input through both paths and both
+paying for the `string()` conversion the call sites actually do:
+
+| | ns/op (6 runs) | B/op | allocs/op |
+|---|---|---|---|
+| bare regex, ordinary body line | 1563–1986 | 208 | 2 |
+| **gated, ordinary body line** | **19.9–23.8** | **0** | **0** |
+| bare regex, actual separator | 1803–3362 | 192 | 2 |
+| gated, actual separator | 1778–2048 | 192 | 2 |
+
+So **~76× on the common case**, and the allocation disappears with it — the gate skips
+the `string(prefetch)` conversion as well as the match. Separators are unchanged, as
+expected: the gate passes and the regex runs anyway.
+
+(An earlier draft of this section quoted 112× from a scratch benchmark that compared a
+string literal against a `[]byte` input, so the bare side was not paying for the
+conversion. The table above is the fair pair.)
+
+Three tests guard it, all in `go-lib-mbox2nntp/mbox_test.go`:
+`TestValididPrefixGate` (the one-way property — nothing `validid` accepts fails the gate),
+`TestValididGateIsTransparent` (the differential test — gated and bare agree on every line
+in the corpus plus every truncation of every accepted shape), and
+`TestValididMinimumMatchLength`.
 
 This is the hottest loop in the importer — it runs once per body line across every TB.
 
@@ -637,9 +662,8 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 5. **I2** — repair `mbox_test.go` so the library has a working test suite again. Do this
    *before* touching `validid`: it is the reason the regex could never be changed safely.
    *(DONE)*
-6. **J3** — the byte-prefix gate in front of `validid`. Isolated, measured 112× on the
-   hottest loop, and provably cannot change behaviour. Unblocked: the suite from I2 now
-   covers it, and `TestValididPrefixGate` asserts the gate's precondition directly.
+6. **J3** — the byte-prefix gate in front of `validid`. Isolated, measured ~76× on the
+   hottest loop, and provably cannot change behaviour.  *(DONE)*
 7. **G, E, J4–J6, A4, B4, B5** — throughput, header handling, regex instrumentation and
    naming, and the optional `>From ` / missing-`Date:` repair work.
 
