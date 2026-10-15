@@ -738,3 +738,68 @@ func TestWalkFilesMatchesFindShGenerated(t *testing.T) {
 		}
 	}
 }
+
+// rewriteHead, review section E. Each case lists lines that must and must
+// not be in the result.
+func TestRewriteHead(t *testing.T) {
+	base := []string{
+		"From: someone@example.invalid",
+		"Newsgroups: test.group",
+		"Date: Mon, 30 Jun 2003 23:33:23 GMT",
+		"Message-ID: <rh@test>",
+	}
+	with := func(lines ...string) []string { return append(append([]string{}, base...), lines...) }
+	cases := []struct {
+		name      string
+		head      []string
+		want, not []string
+		code      int
+	}{
+		// E1: the last line was never looked at as a continuation, so a
+		// dropped Xref folded onto it leaked its tail into the header
+		{"Xref folded onto the last line", with("Subject: s", "Xref: host a.b:1", " c.d:2"),
+			nil, []string{" c.d:2", "Xref: host a.b:1"}, 0},
+		// E1: an empty Subject folded onto the last line was dropped as
+		// "too short", its continuation was kept, and the article got 437
+		{"Subject folded onto the last line", with("Subject:", " the subject"),
+			[]string{"Subject: ", " the subject"}, nil, 0},
+		// E2: head[0] was never anyone's previous line
+		{"broken date line after a first continuation", append([]string{" folded", "Thu, 5 Aug 2004 21:50:04 EDT", "Subject: s"}, base...),
+			nil, []string{"Thu, 5 Aug 2004 21: 50:04 EDT", "Thu, 5 Aug 2004 21:50:04 EDT"}, 0},
+		// E4: one-character values without a space were dropped
+		{"one-character values", with("Subject: s", "Lines:7", "X-No-Archive:1"),
+			[]string{"Lines: 7", "X-No-Archive: 1"}, nil, 0},
+		{"empty values are still dropped", with("Subject: s", "Keywords:", "Summary: "),
+			nil, []string{"Keywords:", "Summary: ", "Summary:"}, 0},
+		// E5: header content passes through; only control characters go
+		{"spaces in values are kept", with("Subject: a  b    c", "X-Trace: x  y"),
+			[]string{"Subject: a  b    c", "X-Trace: x  y"}, nil, 0},
+		{"tab and NUL become spaces", with("Subject: a\tb\x00c"),
+			[]string{"Subject: a b c"}, nil, 0},
+		{"Path gets the prefix", with("Subject: s", "Path: a!b"),
+			[]string{"Path: mbox2nntp" + my_mboxfile + "!a!b"}, nil, 0},
+		{"no Date", []string{"Subject: s", "Message-ID: <rh@test>"}, nil, nil, 437},
+		{"no Subject", base, nil, nil, 437},
+	}
+	for _, tc := range cases {
+		got, _, code := rewriteHead("<rh@test>", tc.head)
+		if code != tc.code {
+			t.Errorf("%s: code = %d, want %d (head %q)", tc.name, code, tc.code, got)
+			continue
+		}
+		has := map[string]bool{}
+		for _, l := range got {
+			has[l] = true
+		}
+		for _, l := range tc.want {
+			if !has[l] {
+				t.Errorf("%s: missing %q in %q", tc.name, l, got)
+			}
+		}
+		for _, l := range tc.not {
+			if has[l] {
+				t.Errorf("%s: unexpected %q in %q", tc.name, l, got)
+			}
+		}
+	}
+}

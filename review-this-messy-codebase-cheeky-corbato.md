@@ -37,7 +37,11 @@ importer's default `dos2unix` pass hides the CRLF part, so a default run lost 1,
 files. **B6 is fixed** in both the library and the importer: 2 articles lost in either mode,
 and gna-clari unchanged.
 
-Still open: **A4, B4–B5, E, F (rest), G, rest of H, I3, J1–J2, J5–J6**.
+**E1 corrupted a header in 82% of gna-clari articles** fed so far: a folded `Xref:` tail
+was appended to the header before it (`Approved`, `Bytes`, `Path`, …). It is fixed; see E
+for whether the server stored or rejected them.
+
+Still open: **A4, B4–B5, rest of H, I3, J1–J2, J5–J6**.
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -466,26 +470,79 @@ The clean gz run (`0.akita-inu.20140617.mbox.gz`) is unchanged: 1,465 sent, 2 re
 
 ## E. Header-processing bugs in `ihave`
 
-- **`mbox2nntp.go:1465`** — `if nextline < len(head)-1` is off by one; should be
+- *(FIXED)* **`mbox2nntp.go:1465`** — `if nextline < len(head)-1` is off by one; should be
   `nextline < len(head)`. The last header line's successor is never inspected, so
   `spaced_nextline` is wrong at `i == len(head)-2` and trailing continuation lines of a
   dropped `Xref:`/`From ` header leak into `newhead`.
   The identical bug is copy-pasted into `nntp-overview/overview.go:2649`.
-- **`mbox2nntp.go:1473`** — `if prevline > 0` should be `>= 0`; `head[0]` is never used as
+- *(FIXED)* **`mbox2nntp.go:1473`** — `if prevline > 0` should be `>= 0`; `head[0]` is never used as
   a previous line.
-- **`mbox2nntp.go:1543`** — `strings.ToLower(header_key_L)` lowercases an
+- *(FIXED)* **`mbox2nntp.go:1543`** — `strings.ToLower(header_key_L)` lowercases an
   already-lowercased value. Harmless, but delete it.
-- **`mbox2nntp.go:1514`** — `len(header_dat) <= 1` drops any header whose value is a single
+- *(FIXED)* **`mbox2nntp.go:1514`** — `len(header_dat) <= 1` drops any header whose value is a single
   character (e.g. `Lines: 7` is fine, but `X-No-Archive:1` style single-char values are
   dropped).
-- **`overview.Clean_Headline`** (`nntp-overview/overview.go:1047`) does
+- *(FIXED in mbox2nntp)* **`overview.Clean_Headline`** (`nntp-overview/overview.go:1047`) does
   `strings.Replace(line, "  ", " ", -1)` — a single non-overlapping pass, so `a····b`
   becomes `a··b` rather than `a·b`. It is not idempotent and it rewrites header *content*
   (Subjects, `X-Trace`, base64 continuations). Consider limiting the collapse to leading
   whitespace of continuation lines.
-- **`mbox2nntp.go:1712`** — `_, err = io.WriteString(CliWriter, CRLF)` ignores `err`,
+- *(FIXED)* **`mbox2nntp.go:1712`** — `_, err = io.WriteString(CliWriter, CRLF)` ignores `err`,
   unlike every other write in the function.
 
+
+**How E was fixed.** The header loop moved out of `ihave` into
+`rewriteHead(msgid, head)`, so it can be tested and measured without a connection. Then:
+
+- E1 is now `nextline < len(head)` and E2 `prevline >= 0`.
+- E4 drops a header only when its value is empty after trimming.
+- The redundant `ToLower` is gone, and the head/body separator write is checked.
+- E5: `cleanHeadline` replaces `overview.Clean_Headline` in `rewriteHead` and in
+  `read_file`. It still turns NUL, backspace, tab and newline into spaces, but no longer
+  collapses double spaces. `nntp-overview` itself is unchanged, because other programs use
+  it, and its copy of the E1 off-by-one (`overview.go:2649`) is still there.
+- Also fixed: a Subject whose text is all on its continuation line (`Subject:` followed by
+  ` text`) got 437. `has_subj` now counts the continuation.
+
+`TestRewriteHead` has a case for each fix, and reverting any one of them fails it.
+
+**Measured on the whole corpus** (5,266,834 articles: usenet-clari, gna-clari and both
+akita files) by running the old and fixed `rewriteHead` side by side:
+
+| fix | articles whose header changes | 437 ↔ accepted |
+|---|---|---|
+| E1 | 4,051,260 | 0 |
+| E5 | 68,202 (double spaces now kept) | 0 |
+| E2, E4 | 0 | 0 |
+
+**E1 is the largest data-corruption finding in this review.** In 4,051,257 of those
+articles, the dropped header with a folded tail is `Xref:`. It is the second-to-last header
+and its tail is the last line, so the old code kept the tail. A continuation line belongs
+to the header before it, so on the wire the other server's group list was appended to
+whatever header preceded `Xref:`. That header was:
+
+| header | articles |
+|---|---|
+| `X-HTML2` | 1,225,333 |
+| `Bytes` | 949,484 |
+| `Approved` | 885,336 |
+| `X-Original-Bytes` | 348,364 |
+| `Path` | 345,779 |
+| `Lines` | 134,473 |
+| `Priority` | 87,355 |
+| `Content-Type` | 42,712 |
+
+For example, `Approved: clarinews@clari.net` was followed by
+` clari.apbl.biz.headlines:276 clari.apbl.briefs:174`. By collection: gna-clari
+4,051,049 of 4,928,790 (82%); `usenet-0.akita-inu` 208; usenet-clari and the akita `.7z`
+none. The other 3 changes keep a folded `Note:` header that was dropped before.
+
+**Already-imported data:** every gna-clari article fed through mbox2nntp went out like this.
+INN either stored it with the extra text in that header, or rejected it with 437. A 437 is
+counted as a rejection, not an error, so the file was still marked `.done`. Which one
+happened is visible on the server, by looking at the headers of one imported gna-clari
+article or at the 437 count in the logs. A re-feed does not repair stored articles: INN
+answers 435 for message-ids it already has. Rejected ones would go through now.
 ---
 
 ## F. Path / cleanup bugs

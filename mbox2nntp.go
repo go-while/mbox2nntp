@@ -656,7 +656,7 @@ func read_file(file_path string) string {
 		}
 		if read_head {
 
-			line = overview.Clean_Headline("?", line, false)
+			line = cleanHeadline(line)
 			if !has_hdr_msgid && line == "Message-ID:" {
 				if i+1 < len(msglines) && strings.HasPrefix(msglines[i+1], " <") {
 					line = "Message-ID: " + msglines[i+1]
@@ -1630,11 +1630,178 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 	//time.Sleep(10 * time.Second)
 
 
-	code := 0
-	has_hdr_path := false
-	has_hdr_from := false
+	newhead, has_hdr_path, code := rewriteHead(msgid, head)
+	if code != 0 {
+		return code
+	}
+
+	if !DRYRUN {
+
+		head_len := len(newhead)
+
+		if head_len > 256 {
+			print_lines(newhead)
+			log.Printf("ERROR ^^^^ head_len=%d msgid='%s'", head_len, msgid)
+			return 437
+		}
+
+		sendcmd, prehash := "", PREHASH_MODE
+		if prehash {
+			msgidhash := hash256(msgid)
+			sendcmd = fmt.Sprintf("IHAVE %s %s", msgid, msgidhash)
+		} else {
+			sendcmd = fmt.Sprintf("IHAVE %s", msgid)
+		}
+		//id, err = srvtp.Cmd(sendcmd)
+		//srvtp.StartResponse(id)
+
+		/*
+		if strings.HasPrefix(msgid, "<_txB3") {
+			log.Printf("--> IHAVE --> msgid='%s' sendcmd='%s'", msgid, sendcmd)
+		}
+		*/
+
+		_, err := io.WriteString(CliWriter, sendcmd+CRLF)
+		if err != nil {
+			log.Printf("ERROR Worker %d ihave failed sendcmd msgid='%s' err='%v'", wid, msgid, err)
+			return -999
+		}
+		err = CliWriter.Flush()
+		if err != nil {
+			log.Printf("ERROR Worker %d ihave failed sendcmd Flush msgid='%s' err='%v'", wid, msgid, err)
+			return -999
+		}
+		//if code, msg, err = srvtp.ReadCodeLine(335); err != nil {
+		if code, _, err = srvtp.ReadCodeLine(335); err != nil {
+			return responseCode(wid, msgid, code, err)
+		}
+
+		//srvtp.EndResponse(id)
+
+
+		for _, line := range newhead {
+			_, err := io.WriteString(CliWriter, line+CRLF)
+			if err != nil {
+				log.Printf("ERROR Worker %d ihave failed head msgid='%s' err='%v'", wid, msgid, err)
+				return -999
+			}
+		}
+
+		if !has_hdr_path {
+			//now := fmt.Sprintf("%d", time.Now().UnixNano() / 1e9)
+			sendline := fmt.Sprintf("Path: mbox2nntp%s!not-for-mail", my_mboxfile)
+			_, err := io.WriteString(CliWriter, sendline+CRLF)
+			if err != nil {
+				log.Printf("ERROR Worker %d ihave failed !has_hdr_path msgid='%s' err='%v'",wid , msgid, err)
+				return -999
+			}
+		}
+
+
+		_, err = io.WriteString(CliWriter, CRLF)
+		if err != nil {
+			log.Printf("ERROR Worker %d ihave failed head/body separator msgid='%s' err='%v'", wid, msgid, err)
+			return -999
+		}
+
+		for _, bline := range bodylines {
+			// RFC 3977 3.1.1: ANY line starting with '.' gets one prepended.
+			// The old code skipped lines starting with ".." so they arrived
+			// one dot short.
+			if strings.HasPrefix(bline, DOT) {
+				bline = DOT + bline
+			}
+
+			/*
+			badline := false
+			if len(bline) >= 1 {
+
+				switch(bline[len(bline)-1]) {
+					case '\r':
+						badline = true
+						log.Printf("ERROR the-last char in bodyline cant be CR")
+
+					case '\n':
+						// DEBUG log.Printf("INFO 1st-last char in bodyline cant be LF... removing len_line=%d", len(bline))
+						bline = bline[0:len(bline)-1]
+						// DEBUG log.Printf("INFO line removed LF... len_line=%d", len(bline))
+
+						if len(bline) >= 1 {
+							if bline[len(bline)-1] == '\n' {
+								log.Printf("ERROR 1LF removed but still last char in bodyline is a LF?! len_line=%d", len(bline))
+								badline = true
+							} else {
+								if bline[len(bline)-1] == '\r' {
+									log.Printf("ERROR 2nd-last char in bodyline cant be CR")
+									badline = true
+								}
+							}
+						}
+				} // end switch
+			}
+			if badline {
+				for i, line := range bodylines {
+					fmt.Println(i, "=", line)
+				}
+				time.Sleep(15 * time.Second)
+				os.Exit(1)
+			}
+			*/
+			//bline = strings.Replace(bline, "\r", "", -1)
+			//bline = strings.Replace(bline, "\n", "", -1)
+			//bline = strings.Replace(bline, "\r\n", "", -1)
+			// nul-char
+			//bline = strings.Replace(bline, "\x00", "", -1)
+			_, err = io.WriteString(CliWriter, bline+CRLF)
+			if err != nil {
+				log.Printf("ERROR Worker %d ihave failed body msgid='%s' err='%v'", wid, msgid, err)
+				return -999
+			}
+		}
+
+
+		_, err = io.WriteString(CliWriter,DOT+CRLF)
+		if err != nil {
+			log.Printf("ERROR Worker %d ihave failed final dot msgid='%s' err='%v'", wid, msgid, err)
+			return -999
+		}
+
+		//CliWriter.Flush()
+		//dw.Close()
+		err = CliWriter.Flush()
+		if err != nil {
+			log.Printf("ERROR Worker %d ihave failed sendcmd Flush msgid='%s' err='%v'", wid, msgid, err)
+			return -999
+		}
+
+		rcode, _, err := srvtp.ReadCodeLine(235)
+		code = responseCode(wid, msgid, rcode, err)
+	} else {
+		code = 235
+	}
+	//os.Exit(0)
+	//time.Sleep(100 * time.Millisecond) // DEBUG_SLEEP
+	return code
+} // end func ihave
+
+// cleanHeadline replaces NUL, backspace, tab and newline in a header line
+// with a space. It is overview.Clean_Headline without its final
+// strings.Replace(line, "  ", " ", -1): a single pass, so four spaces became
+// two, and it rewrote header content (Subjects, X-Trace, encoded words)
+// that INN accepts as it is. Tabs still go, as they did.
+func cleanHeadline(line string) string {
+	if strings.ContainsAny(line, "\x00\010\t\n") {
+		line = strings.NewReplacer("\x00", " ", "\010", " ", "\t", " ", "\n", " ").Replace(line)
+	}
+	return line
+}
+
+// rewriteHead turns a parsed article's header lines into the ones IHAVE
+// sends: Path gets our prefix, Xref/Expires/"From " lines and their
+// continuations are dropped, Message-ID is reduced to the one being fed,
+// colon-space is repaired. code is 0, or 437 when Subject or Date is missing.
+func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bool, code int) {
 	has_hdr_date := false
-	var newhead []string
 
 	fix_msgid := false
 	try_fix_date := false
@@ -1646,7 +1813,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 	nntp_posting_date := ""
 
 	for i, line := range head {
-		line = overview.Clean_Headline("?", line, DEBUG)
+		line = cleanHeadline(line)
 		spaced_line := false
 		if len(line) > 0 {
 			spaced_line = isspace(line[0])
@@ -1659,7 +1826,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		prevline := i-1
 		//log.Printf("msgid='%s' line=%d", msgid, i)
 		// get the next line if any
-		if nextline < len(head)-1 {
+		if nextline < len(head) {
 			if head[nextline] != "" {
 				//str_nextline = head[nextline] // next line as string
 				spaced_nextline = isspace(head[nextline][0]) // first char of next line
@@ -1667,7 +1834,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		}
 
 		// get previous line
-		if prevline > 0 && len(head[prevline]) > 0 {
+		if prevline >= 0 && len(head[prevline]) > 0 {
 			spaced_prevline = isspace(head[prevline][0])
 		}
 
@@ -1708,8 +1875,10 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 			// remove "key:" from line
 			header_dat := strings.Replace(line, header_key+":", "", 1)
 
-			if len(header_dat) <= 1 && !spaced_nextline {
-				//header_dat is too short
+			if strings.TrimSpace(header_dat) == "" && !spaced_nextline {
+				// empty value; this was len(header_dat) <= 1, which also
+				// dropped one-character values written without a space
+				// ("Lines:7")
 				//if debug_header { log.Printf("   |short header_dat msgid='%s' ignore line='%s' nextline='%s'", s.messageid, line, str_nextline) }
 				continue
 			}
@@ -1726,7 +1895,8 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 			header_key_L := strings.ToLower(header_key)
 
 			if !has_subj && header_key_L == "subject" {
-				if len(header_dat) > 0 {
+				// the text may be all on the continuation line
+				if len(header_dat) > 0 || spaced_nextline {
 					has_subj = true
 				}
 			}
@@ -1737,7 +1907,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 				line = string(header_key+": mbox2nntp"+my_mboxfile+"!"+header_dat)
 			} else
 			// check headers
-			if strings.ToLower(header_key_L) == "message-id" {
+			if header_key_L == "message-id" {
 				if has_msgid {
 					messageids = append(messageids, header_dat)
 					continue
@@ -1821,7 +1991,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 	if !has_subj {
 		log.Printf("Error msgid='%s' !has_subj", msgid)
 		//head = append(head, "Subject: -")
-		return 437
+		return nil, false, 437
 	}
 
 	if fix_msgid || !has_msgid {
@@ -1837,154 +2007,10 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 
 	if !has_hdr_date {
 		log.Printf("Error msgid='%s' !has_hdr_date", msgid)
-		return 437
+		return nil, false, 437
 	}
-
-	if !DRYRUN {
-
-		head_len := len(newhead)
-
-		if head_len > 256 {
-			print_lines(newhead)
-			log.Printf("ERROR ^^^^ head_len=%d msgid='%s'", head_len, msgid)
-			return 437
-		}
-
-		sendcmd, prehash := "", PREHASH_MODE
-		if prehash {
-			msgidhash := hash256(msgid)
-			sendcmd = fmt.Sprintf("IHAVE %s %s", msgid, msgidhash)
-		} else {
-			sendcmd = fmt.Sprintf("IHAVE %s", msgid)
-		}
-		//id, err = srvtp.Cmd(sendcmd)
-		//srvtp.StartResponse(id)
-
-		/*
-		if strings.HasPrefix(msgid, "<_txB3") {
-			log.Printf("--> IHAVE --> msgid='%s' sendcmd='%s'", msgid, sendcmd)
-		}
-		*/
-
-		_, err := io.WriteString(CliWriter, sendcmd+CRLF)
-		if err != nil {
-			log.Printf("ERROR Worker %d ihave failed sendcmd msgid='%s' err='%v'", wid, msgid, err)
-			return -999
-		}
-		err = CliWriter.Flush()
-		if err != nil {
-			log.Printf("ERROR Worker %d ihave failed sendcmd Flush msgid='%s' err='%v'", wid, msgid, err)
-			return -999
-		}
-		//if code, msg, err = srvtp.ReadCodeLine(335); err != nil {
-		if code, _, err = srvtp.ReadCodeLine(335); err != nil {
-			return responseCode(wid, msgid, code, err)
-		}
-
-		//srvtp.EndResponse(id)
-
-
-		for _, line := range newhead {
-			_, err := io.WriteString(CliWriter, line+CRLF)
-			if err != nil {
-				log.Printf("ERROR Worker %d ihave failed head msgid='%s' err='%v'", wid, msgid, err)
-				return -999
-			}
-		}
-
-		if !has_hdr_path {
-			//now := fmt.Sprintf("%d", time.Now().UnixNano() / 1e9)
-			sendline := fmt.Sprintf("Path: mbox2nntp%s!not-for-mail", my_mboxfile)
-			_, err := io.WriteString(CliWriter, sendline+CRLF)
-			if err != nil {
-				log.Printf("ERROR Worker %d ihave failed !has_hdr_path msgid='%s' err='%v'",wid , msgid, err)
-				return -999
-			}
-		}
-
-		if !has_hdr_from { }
-
-		_, err = io.WriteString(CliWriter, CRLF)
-
-		for _, bline := range bodylines {
-			// RFC 3977 3.1.1: ANY line starting with '.' gets one prepended.
-			// The old code skipped lines starting with ".." so they arrived
-			// one dot short.
-			if strings.HasPrefix(bline, DOT) {
-				bline = DOT + bline
-			}
-
-			/*
-			badline := false
-			if len(bline) >= 1 {
-
-				switch(bline[len(bline)-1]) {
-					case '\r':
-						badline = true
-						log.Printf("ERROR the-last char in bodyline cant be CR")
-
-					case '\n':
-						// DEBUG log.Printf("INFO 1st-last char in bodyline cant be LF... removing len_line=%d", len(bline))
-						bline = bline[0:len(bline)-1]
-						// DEBUG log.Printf("INFO line removed LF... len_line=%d", len(bline))
-
-						if len(bline) >= 1 {
-							if bline[len(bline)-1] == '\n' {
-								log.Printf("ERROR 1LF removed but still last char in bodyline is a LF?! len_line=%d", len(bline))
-								badline = true
-							} else {
-								if bline[len(bline)-1] == '\r' {
-									log.Printf("ERROR 2nd-last char in bodyline cant be CR")
-									badline = true
-								}
-							}
-						}
-				} // end switch
-			}
-			if badline {
-				for i, line := range bodylines {
-					fmt.Println(i, "=", line)
-				}
-				time.Sleep(15 * time.Second)
-				os.Exit(1)
-			}
-			*/
-			//bline = strings.Replace(bline, "\r", "", -1)
-			//bline = strings.Replace(bline, "\n", "", -1)
-			//bline = strings.Replace(bline, "\r\n", "", -1)
-			// nul-char
-			//bline = strings.Replace(bline, "\x00", "", -1)
-			_, err = io.WriteString(CliWriter, bline+CRLF)
-			if err != nil {
-				log.Printf("ERROR Worker %d ihave failed body msgid='%s' err='%v'", wid, msgid, err)
-				return -999
-			}
-		}
-
-
-		_, err = io.WriteString(CliWriter,DOT+CRLF)
-		if err != nil {
-			log.Printf("ERROR Worker %d ihave failed final dot msgid='%s' err='%v'", wid, msgid, err)
-			return -999
-		}
-
-		//CliWriter.Flush()
-		//dw.Close()
-		err = CliWriter.Flush()
-		if err != nil {
-			log.Printf("ERROR Worker %d ihave failed sendcmd Flush msgid='%s' err='%v'", wid, msgid, err)
-			return -999
-		}
-
-		rcode, _, err := srvtp.ReadCodeLine(235)
-		code = responseCode(wid, msgid, rcode, err)
-	} else {
-		code = 235
-	}
-	//os.Exit(0)
-	//time.Sleep(100 * time.Millisecond) // DEBUG_SLEEP
-	return code
-} // end func ihave
+	return newhead, has_hdr_path, 0
+} // end func rewriteHead
 
 // responseCode turns a ReadCodeLine result into ihave's return code. A
 // *textproto.Error is the server answering with another code (435, 436,
