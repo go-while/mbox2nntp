@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
@@ -318,6 +319,284 @@ func TestCRLFArticleOnTheWire(t *testing.T) {
 	for _, want := range []string{"From: C-ap@clari.net (AP)\r\n", "Subject: a folded\r\n", "\r\n\r\nbody one\r\nbody two\r\n"} {
 		if !strings.Contains(wire, want) {
 			t.Errorf("wire is missing %q:\n%q", want, wire)
+		}
+	}
+}
+
+// nntpHandler scripts one backend connection. startScriptedNNTP hands the
+// i-th accepted connection to handlers[i]; the last handler repeats.
+type nntpHandler func(c net.Conn, r *bufio.Reader)
+
+func startScriptedNNTP(t *testing.T, handlers ...nntpHandler) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for i := 0; ; i++ {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			h := handlers[len(handlers)-1]
+			if i < len(handlers) {
+				h = handlers[i]
+			}
+			go func() {
+				defer c.Close()
+				h(c, bufio.NewReader(c))
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+func say(c net.Conn, line string) { c.Write([]byte(line + CRLF)) }
+
+// expectIHAVE reads one command line and returns the message-id, or "" if
+// the command was not IHAVE (QUIT) or the client went away.
+func expectIHAVE(r *bufio.Reader) string {
+	line, err := r.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "IHAVE ") {
+		return ""
+	}
+	return strings.Fields(line)[1]
+}
+
+func readArticle(r *bufio.Reader) {
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil || line == DOT+CRLF {
+			return
+		}
+	}
+}
+
+// waitForClose reports whether the client closed the connection within d.
+func waitForClose(c net.Conn, r *bufio.Reader, d time.Duration) bool {
+	c.SetReadDeadline(time.Now().Add(d))
+	for {
+		if _, err := r.ReadString('\n'); err != nil {
+			return err == io.EOF
+		}
+	}
+}
+
+// accepting takes every article and reports its message-id on got.
+func accepting(got chan<- string) nntpHandler {
+	return func(c net.Conn, r *bufio.Reader) {
+		say(c, "200 fake ready")
+		for {
+			msgid := expectIHAVE(r)
+			if msgid == "" {
+				return
+			}
+			say(c, "335 send it")
+			readArticle(r)
+			say(c, "235 thanks")
+			got <- msgid
+		}
+	}
+}
+
+// shortTimeouts makes failures fast for one test.
+func shortTimeouts(t *testing.T) {
+	timeout, delay, tries := NNTP_TIMEOUT, retryDelay, MAX_TRIES
+	NNTP_TIMEOUT, retryDelay, MAX_TRIES = 300*time.Millisecond, 10*time.Millisecond, 3
+	t.Cleanup(func() { NNTP_TIMEOUT, retryDelay, MAX_TRIES = timeout, delay, tries })
+}
+
+var testArticleHead = []string{
+	"From: someone@example.invalid",
+	"Subject: session test",
+	"Newsgroups: test.group",
+	"Date: Mon, 30 Jun 2003 23:33:23 GMT",
+	"Message-ID: <session@test>",
+}
+
+// D3: ReadCodeLine(20) accepts 200-209, so a greeting such as "205 closing
+// connection" passed it, and connectBackend returned (nil, nil, nil); the
+// worker then used the nil conn. Other codes already came back as errors.
+func TestConnectBackendUnexpectedGreeting(t *testing.T) {
+	for _, greeting := range []string{"205 closing connection", "202 odd", "250 surprise", "400 go away"} {
+		addr := startScriptedNNTP(t, func(c net.Conn, r *bufio.Reader) { say(c, greeting) })
+		srvtp, w, err := connectBackend(addr)
+		if err == nil || srvtp != nil || w != nil {
+			t.Errorf("%q: connectBackend = %v, %v, %v; want nil, nil, an error", greeting, srvtp, w, err)
+		}
+	}
+}
+
+// B3, D2: a connection that fails while ihave waits for a reply must return
+// -999 (requeue, reconnect), not 0, which dropped the article and kept the
+// dead connection. A server refusing the article keeps its own code.
+func TestIhaveResponseCodes(t *testing.T) {
+	shortTimeouts(t)
+	cases := []struct {
+		name string
+		h    nntpHandler
+		want int
+	}{
+		{"closed after IHAVE", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+		}, -999},
+		{"closed after the article", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "335 send it")
+			readArticle(r)
+		}, -999},
+		{"silent after the article", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "335 send it")
+			readArticle(r)
+			waitForClose(c, r, 5*time.Second)
+		}, -999},
+		{"garbled reply", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "what?")
+		}, -999},
+		{"435 duplicate", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "435 have it")
+		}, 435},
+		{"436 later", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "436 throttled")
+		}, 436},
+		{"437 rejected", func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "335 send it")
+			readArticle(r)
+			say(c, "437 no thanks")
+		}, 437},
+	}
+	for _, tc := range cases {
+		srvtp, w, err := connectBackend(startScriptedNNTP(t, tc.h))
+		if err != nil {
+			t.Fatalf("%s: connectBackend: %v", tc.name, err)
+		}
+		done := make(chan int, 1)
+		go func() { done <- ihave(1, "<session@test>", testArticleHead, []string{"body"}, srvtp, w) }()
+		select {
+		case got := <-done:
+			if got != tc.want {
+				t.Errorf("%s: ihave = %d, want %d", tc.name, got, tc.want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: ihave still blocked after 5s", tc.name)
+		}
+		srvtp.Close()
+	}
+}
+
+// setupWorker gives one worker a fresh queue holding one article.
+func setupWorker(t *testing.T, addr string) {
+	t.Helper()
+	shortTimeouts(t)
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	worker_channel = make(chan *ArticleItem, 10)
+	requeue_channel = make(chan *ArticleItem, 10)
+	saved := nntpserv
+	nntpserv = addr
+	t.Cleanup(func() { nntpserv = saved })
+	worker_channel <- &ArticleItem{msgid: "<session@test>", head: testArticleHead, body: []string{"body"}}
+	globalCounter.setCounter("msgnums", 1)
+	globalBools.SetGB("process", true)
+	globalBools.SetGB("feeder_done", true)
+}
+
+func runWorker(t *testing.T) {
+	t.Helper()
+	go worker(1)
+	deadline := time.Now().Add(10 * time.Second)
+	for globalCounter.getCounter("worker_done") != 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("worker did not finish within 10s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// B2, B3, D1, D2 together: the server answers 436, then drops the
+// connection, then goes silent, then takes the article. It must arrive
+// exactly once, each dead connection must be closed by the client, and
+// nothing may count as an error.
+func TestWorkerSurvivesASessionGoingWrong(t *testing.T) {
+	got := make(chan string, 10)
+	closed := make(chan bool, 1)
+	addr := startScriptedNNTP(t,
+		func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "436 throttled")
+			expectIHAVE(r)
+			say(c, "335 send it")
+			readArticle(r)
+		},
+		func(c net.Conn, r *bufio.Reader) {
+			say(c, "200 ok")
+			expectIHAVE(r)
+			say(c, "335 send it")
+			readArticle(r)
+			closed <- waitForClose(c, r, 5*time.Second)
+		},
+		accepting(got),
+	)
+	setupWorker(t, addr)
+	runWorker(t)
+
+	select {
+	case ok := <-closed:
+		if !ok {
+			t.Error("the client never closed the connection that went silent")
+		}
+	case <-time.After(10 * time.Second):
+		t.Error("the worker never opened a second connection")
+	}
+	if n := len(got); n != 1 {
+		t.Errorf("article arrived %d times, want 1", n)
+	}
+	for name, want := range map[string]int{"sent": 1, "wnntperrcnt": 0, "msgnums": 0} {
+		if v := globalCounter.getCounter(name); v != want {
+			t.Errorf("counter %s = %d, want %d", name, v, want)
+		}
+	}
+}
+
+// B2: a server that never stops answering 436 must cost an error after
+// MAX_TRIES, so the file is not marked done, and the worker must still finish.
+func TestWorkerGivesUpAfterMaxTries(t *testing.T) {
+	ihaves := make(chan string, 20)
+	addr := startScriptedNNTP(t, func(c net.Conn, r *bufio.Reader) {
+		say(c, "200 ok")
+		for {
+			msgid := expectIHAVE(r)
+			if msgid == "" {
+				return
+			}
+			ihaves <- msgid
+			say(c, "436 throttled")
+		}
+	})
+	setupWorker(t, addr)
+	runWorker(t)
+
+	if n := len(ihaves); n != MAX_TRIES+1 {
+		t.Errorf("IHAVE sent %d times, want %d", n, MAX_TRIES+1)
+	}
+	for name, want := range map[string]int{"sent": 0, "wnntperrcnt": 1, "msgnums": 0} {
+		if v := globalCounter.getCounter(name); v != want {
+			t.Errorf("counter %s = %d, want %d", name, v, want)
 		}
 	}
 }

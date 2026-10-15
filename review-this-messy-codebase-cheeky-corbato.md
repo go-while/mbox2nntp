@@ -37,7 +37,7 @@ importer's default `dos2unix` pass hides the CRLF part, so a default run lost 1,
 files. **B6 is fixed** in both the library and the importer: 2 articles lost in either mode,
 and gna-clari unchanged.
 
-Still open: **A4, B2–B5, D, E, F, G, rest of H, I3, J1–J2, J5–J6**.
+Still open: **A4, B4–B5, E, F (rest), G, rest of H, I3, J1–J2, J5–J6**.
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -209,7 +209,7 @@ if !bytes.HasSuffix(lines, []byte("\n.")) && !bytes.Equal(lines, []byte(".")) {
 }
 ```
 
-### B2. `ihave` return code 436 is silently discarded
+### B2. `ihave` return code 436 is silently discarded  *(FIXED)*
 `mbox2nntp.go:1338-1339` — `case 436:` has an empty body, then
 `mbox2nntp.go:1363` decrements `msgnums`. 436 means "transfer failed, try again later";
 the article is dropped and not even counted as an error, so `terrcnt` stays 0 and the mbox
@@ -218,7 +218,7 @@ gets renamed `.done` (`mbox2nntp.go:824-838`).
 **Fix:** treat 436 like -999 (requeue), or at minimum count it into `werrcnt` so the source
 is not marked done.
 
-### B3. Read errors report code 0, which is swallowed by `default:`
+### B3. Read errors report code 0, which is swallowed by `default:`  *(FIXED)*
 `mbox2nntp.go:1683` and `mbox2nntp.go:1787`
 
 `textproto.ReadCodeLine` returns `code == 0` for I/O errors (connection reset, timeout) as
@@ -393,7 +393,7 @@ last line is exactly `Message-ID:`. Guard with `i+1 < len(msglines)`.
 
 ## D. Connection handling
 
-### D1. Socket leak on every reconnect
+### D1. Socket leak on every reconnect  *(FIXED)*
 `connectBackend` (`mbox2nntp.go:198`) returns the `*textproto.Conn` but the worker never
 closes it. On the -999 path (`mbox2nntp.go:1344-1358`) the worker abandons `srvtp` and
 spawns a replacement — the old socket is never closed and the old `net.Conn` is
@@ -402,20 +402,65 @@ unreachable. A long run against a flaky server exhausts file descriptors.
 **Fix:** return the `net.Conn` (or call `srvtp.Close()`) and close it before reconnecting
 and on worker exit; send `QUIT` first.
 
-### D2. No read/write deadlines
+### D2. No read/write deadlines  *(FIXED)*
 `net.DialTimeout` covers only the dial. Neither `srvtp.ReadCodeLine` call has a deadline,
 so a stalled peer hangs a worker forever with no diagnostic — this is the classic "import
 stopped overnight" symptom.
 
 **Fix:** keep the `net.Conn` and `SetDeadline` around each request/response.
 
-### D3. `connectBackend` can return `(nil, nil, nil)`
-`mbox2nntp.go:212-216` — for a 2xx greeting that is neither 200 nor 201 (e.g. 250),
-`ReadCodeLine(20)` succeeds with `err == nil`, the guard fires, and the function returns
-three nils. The worker sees `cerr == nil`, breaks out of `loop_CB`, and dereferences a nil
+### D3. `connectBackend` can return `(nil, nil, nil)`  *(FIXED)*
+`mbox2nntp.go:212-216` — `ReadCodeLine(20)` checks the first *two* digits, so it accepts
+200–209. For a greeting in that range other than 200 or 201 (e.g. `205 closing
+connection`), it succeeds with `err == nil`, the guard fires, and the function returns
+three nils. (An earlier version of this note said "e.g. 250": a 250 greeting already
+failed `ReadCodeLine` with an error, so it was never affected.) The worker sees `cerr == nil`, breaks out of `loop_CB`, and dereferences a nil
 `*textproto.Conn` in `ihave`.
 
 **Fix:** synthesize an error in that branch.
+
+### B2, B3, D1–D3: how they were fixed
+
+Applied together, because they share one fix: owning the connection.
+
+- **D2:** `connectBackend` wraps the `net.Conn` in a `deadlineConn` that sets a fresh
+  `NNTP_TIMEOUT` (2 min) deadline before every `Read` and `Write`. `ihave`'s signature is
+  unchanged.
+- **B3:** both `ReadCodeLine` calls in `ihave` go through `responseCode`. A
+  `*textproto.Error` is the server answering, so its code is kept (435/436/437). Anything
+  else (EOF, reset, timeout, a garbled line) returns `-999`.
+- **B2:** in `worker`, 436 and `-999` requeue the article with linear backoff, up to
+  `MAX_TRIES` (10). After that it counts into `werrcnt`, so the file is not marked done.
+  `msgnums` is decremented only once an article is finished.
+- **D1:** on `-999` the worker sends `QUIT` and closes the old connection before handing
+  over to a fresh worker, and it does the same on normal exit (`closeBackend`).
+- **D3:** the synthesized error, as above.
+- **Also closed:** a worker that gave up connecting (after 3,600 retries) left its articles
+  queued, but `iterateMbox` still saw every worker finished with `terrcnt == 0` and marked
+  the file done. Now a non-zero `msgnums` at the end blocks `done`.
+
+Tests run against a scripted fake server:
+
+- `TestIhaveResponseCodes` covers a close after IHAVE, a close after the article, silence,
+  a garbled reply, and 435/436/437.
+- `TestConnectBackendUnexpectedGreeting` covers 205, 202, 250 and 400.
+- `TestWorkerSurvivesASessionGoingWrong`: 436, then a drop, then silence, then accept. The
+  article must arrive once, the silent connection must be closed by the client, and there
+  must be no errors.
+- `TestWorkerGivesUpAfterMaxTries` checks that a permanent 436 ends as one counted error.
+
+Each fix was reverted in turn: B2, B3, D1, D2 and D3 are each caught by at least one of
+these tests.
+
+End to end on the archive.org file `0.akita-inu.(1825).mbox.7z` (1,545 articles in a clean
+run), against a server that misbehaves on purpose:
+
+| scenario | HEAD before the fix | fixed |
+|---|---|---|
+| 436 every 37th IHAVE, drop after every 101st article | 1,430 received; 40 lost silently to 436, 75 counted as errors; not done | 1,545 received, identical set; done |
+| one silent connection | hung until killed at 360 s; not done | timed out at 2 min, requeued; 1,545 in 124 s; done |
+
+The clean gz run (`0.akita-inu.20140617.mbox.gz`) is unchanged: 1,465 sent, 2 refused locally.
 
 ---
 
@@ -811,8 +856,8 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 
 1. **A1, A2, A3, B1, C1, C2** — corruption and crashes, each a few lines. Do these first
    and together; they are independent of any restructuring.  *(DONE)*
-2. **B2, B3, D1, D2, D3** — NNTP session correctness. Requires threading the `net.Conn`
-   through `connectBackend` → `worker` → `ihave`.
+2. **B2, B3, D1, D2, D3** — NNTP session correctness.  *(DONE — via a deadline-setting
+   connection wrapper rather than threading the `net.Conn` through)*
 3. **F** — path and cleanup fixes; switch to `filepath.Join`/`filepath.Base`, replace
    `find.sh` with `filepath.WalkDir`, add `--` to the exec calls.
 4. **H** — unblock the build (`go-utils`), then `gofmt`, `go vet` clean, dead-code

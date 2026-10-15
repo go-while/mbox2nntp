@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	//"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"bufio"
 	"bytes"
 	"fmt"
@@ -45,6 +46,7 @@ type ArticleItem struct {
 	msgid       string
 	head        []string
 	body        []string
+	tries       int // times requeued after 436 or a failed connection
 } // end ArticleItem struct
 
 var (
@@ -56,6 +58,14 @@ var (
 	MaxWorkers = 1
 	tmpdir = "."
 	nntpserv = ""
+	// NNTP_TIMEOUT bounds every read and write on a backend connection, so
+	// a peer that stops responding fails the call instead of hanging the
+	// worker. Generous: it detects a dead peer, it is not a latency limit.
+	NNTP_TIMEOUT = 2 * time.Minute
+	// MAX_TRIES caps how often one article is requeued after a 436 or a
+	// failed connection; after that it counts as an error.
+	MAX_TRIES = 10
+	retryDelay = time.Second // backoff unit between tries
 	addedgroups = make(map[string]bool)
 	nntpdup435 = 0
 	nntp437 = 0
@@ -195,6 +205,23 @@ func (c *GlobalBools) getGB(name string) bool {
 } // end func globalBools.GetGB
 */
 
+// deadlineConn sets a fresh NNTP_TIMEOUT deadline before every Read and
+// Write: net.DialTimeout covers only the dial.
+type deadlineConn struct {
+	net.Conn
+	timeout time.Duration
+}
+
+func (c *deadlineConn) Read(p []byte) (int, error) {
+	c.Conn.SetReadDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Read(p)
+}
+
+func (c *deadlineConn) Write(p []byte) (int, error) {
+	c.Conn.SetWriteDeadline(time.Now().Add(c.timeout))
+	return c.Conn.Write(p)
+}
+
 func connectBackend(rserver string) (*textproto.Conn, *bufio.Writer, error) {
 	//conn, err := net.DialTimeout("tcp4", rserver, 5 * time.Second)
 	//conn, err := net.DialTimeout("tcp6", rserver, 5 * time.Second)
@@ -205,17 +232,33 @@ func connectBackend(rserver string) (*textproto.Conn, *bufio.Writer, error) {
 		return nil, nil, err
 	}
 
-	srvtp := textproto.NewConn(conn)
-	CliWriter := bufio.NewWriter(conn)
+	dconn := &deadlineConn{Conn: conn, timeout: NNTP_TIMEOUT}
+	srvtp := textproto.NewConn(dconn)
+	CliWriter := bufio.NewWriter(dconn)
 	code, msg, err := srvtp.ReadCodeLine(20)
 
 	if code != 200 && code != 201 {
 		log.Printf("connectBackend code=%d msg='%s' err='%v'", code, msg, err)
 		conn.Close()
+		if err == nil {
+			// any other 2xx passes ReadCodeLine(20): without this the
+			// caller got (nil, nil, nil) and crashed on the nil conn
+			err = fmt.Errorf("connectBackend: unexpected greeting %d %s", code, msg)
+		}
 		return nil, nil, err
 	}
 
-	return srvtp, CliWriter, err
+	return srvtp, CliWriter, nil
+}
+
+// closeBackend says QUIT, without waiting for the answer, and closes.
+func closeBackend(srvtp *textproto.Conn, cliwriter *bufio.Writer) {
+	if srvtp == nil {
+		return
+	}
+	io.WriteString(cliwriter, "QUIT"+CRLF)
+	cliwriter.Flush()
+	srvtp.Close()
 }
 
 
@@ -635,7 +678,7 @@ func read_file(file_path string) string {
 	if queued > markhi {
 		globalBools.SetGB("process", true)
 	}
-	worker_channel <- &ArticleItem{ msgid, header, body }
+	worker_channel <- &ArticleItem{msgid: msgid, head: header, body: body}
 	return msgid
 } // end read_file
 
@@ -1279,7 +1322,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 		// TODO clear msgidhashdb
 		globalCounter.incCounter(0, "msgnums")
-		worker_channel <- &ArticleItem{ msgid, head, body }
+		worker_channel <- &ArticleItem{msgid: msgid, head: head, body: body}
 
 	} // end for
 	if !process {
@@ -1333,7 +1376,10 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	log.Printf("Done sending iterateMbox. %d/%d dup=%d e437=%d err=%d filter=%d", tsentcnt, ttot, tnntpdup435, tnntp437, terrcnt, tnntp999)
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot || tsentcnt+tnntpdup435+tnntp437 == ttot ) && terrcnt == 0 {
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot) && terrcnt == 0 {
-	if terrcnt == 0 && !stoppedEarly {
+	// workers that gave up connecting leave articles queued but unsent
+	if left := globalCounter.getCounter("msgnums"); left != 0 {
+		log.Printf("ERROR: %d articles were never sent, not marking done", left)
+	} else if terrcnt == 0 && !stoppedEarly {
 		globalBools.SetGB("done", true)
 	}
 } // end func iterateMbox
@@ -1404,37 +1450,57 @@ func worker(wid int) {
 				//}
 
 				code = ihave(wid, article.msgid, article.head, article.body, srvtp, cliwriter)
+				requeued := false
 				switch code {
 					case 235:
 						wsentcnt++
 					case 435:
 						wnntpdup435++
-					case 436:
-						//wnntp436++
 					case 437:
 						wnntp437++
 					case 999:
 						wnntp999++
-					case -999:
-						// re-queue
-						log.Printf("Worker %d) ihave failed! re-queue article.msgid='%s'", wid, article.msgid)
-						go func(article *ArticleItem, worker_channel chan *ArticleItem){
-							worker_channel <- article
-						}(article, worker_channel)
-						time.Sleep(time.Second)
-						go worker(wid)
-						globalCounter.addCounter(wid, "sent", wsentcnt)
-						globalCounter.addCounter(wid, "total", wtot)
-						globalCounter.addCounter(wid, "wnntpdup435", wnntpdup435)
-						globalCounter.addCounter(wid, "wnntperr437", wnntp437)
-						globalCounter.addCounter(wid, "wnntperrcnt", werrcnt)
-						globalCounter.addCounter(wid, "tnntp999", wnntp999)
-						return
+					case 436, -999:
+						// 436: the server wants it later. -999: the connection
+						// failed. Either way it was not taken: requeue it with
+						// backoff, a bounded number of times, rather than drop it.
+						if article.tries < MAX_TRIES {
+							article.tries++
+							requeued = true
+							log.Printf("Worker %d) code=%d requeue msgid='%s' try=%d/%d", wid, code, article.msgid, article.tries, MAX_TRIES)
+							go func(article *ArticleItem, delay time.Duration) {
+								time.Sleep(delay)
+								worker_channel <- article
+							}(article, time.Duration(article.tries)*retryDelay)
+						} else {
+							log.Printf("ERROR Worker %d) code=%d giving up msgid='%s' after %d tries", wid, code, article.msgid, article.tries)
+							werrcnt++
+						}
+						if code == -999 {
+							// the connection is unusable: close it and hand over
+							// to a fresh worker, which reconnects
+							closeBackend(srvtp, cliwriter)
+							if !requeued {
+								globalCounter.subCounter(wid, "msgnums", 1)
+							}
+							time.Sleep(retryDelay)
+							go worker(wid)
+							globalCounter.addCounter(wid, "sent", wsentcnt)
+							globalCounter.addCounter(wid, "total", wtot)
+							globalCounter.addCounter(wid, "wnntpdup435", wnntpdup435)
+							globalCounter.addCounter(wid, "wnntperr437", wnntp437)
+							globalCounter.addCounter(wid, "wnntperrcnt", werrcnt)
+							globalCounter.addCounter(wid, "tnntp999", wnntp999)
+							return
+						}
+						time.Sleep(retryDelay) // 436: server busy or throttled
 					default:
 						log.Printf("ihave returned werrcnt code=%d", code)
 						werrcnt++
 				} // end switch
-				globalCounter.subCounter(wid, "msgnums", 1)
+				if !requeued {
+					globalCounter.subCounter(wid, "msgnums", 1)
+				}
 
 				if wcnt >= 1000 {
 					//globalCounter.subCounter(wid, "msgnums", 1000)
@@ -1450,6 +1516,7 @@ func worker(wid int) {
 		} // end select worker_channel
 	} // end for
 	//globalCounter.subCounter(wid, "msgnums", wcnt)
+	closeBackend(srvtp, cliwriter)
 	globalCounter.incCounter(wid, "worker_done")
 	log.Printf("Done Worker %d) totalWdone=%d maxW=%d wtot=%d sent=%d e435=%d e437=%d errcnt=%d filter=%d", wid, globalCounter.getCounter("worker_done"), MaxWorkers, wtot, wsentcnt, wnntpdup435, wnntp437, werrcnt, wnntp999)
 	globalCounter.addCounter(wid, "sent", wsentcnt)
@@ -1755,9 +1822,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		}
 		//if code, msg, err = srvtp.ReadCodeLine(335); err != nil {
 		if code, _, err = srvtp.ReadCodeLine(335); err != nil {
-			//log.Printf("ERROR Worker %d) ihave asked msgid='%s' err='%v' code=%d msg='%s'", wid, msgid, err, code, msg)
-			//srvtp.EndResponse(id)
-			return code
+			return responseCode(wid, msgid, code, err)
 		}
 
 		//srvtp.EndResponse(id)
@@ -1855,53 +1920,8 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 			return -999
 		}
 
-		//rcode := 0
-		if rcode, _, err := srvtp.ReadCodeLine(235); err != nil {
-
-			if rcode != 235 {
-				// DEBUG
-				if rcode == 437 {
-					/*
-					print_debug := true
-
-					if strings.HasPrefix(msg, "Unwanted character ") {
-						print_debug = true
-					} else
-					if strings.HasPrefix(msg, "Bad ") {
-						print_debug = true
-					} else
-					if strings.HasPrefix(msg, "Space ") {
-						print_debug = true
-					} else
-					if strings.HasPrefix(msg, "Missing ") {
-						print_debug = true
-					}
-
-					if print_debug {
-
-						log.Printf("---> ORGHEAD DEBUG msgid='%s'", msgid)
-						print_lines(head)
-						log.Printf("# # # # # # #")
-						log.Printf("---> NEWHEAD DEBUG msgid='%s'", msgid)
-						print_lines(newhead)
-						log.Printf("---> BODY DEBUG msgid='%s'", msgid)
-						print_lines(bodylines)
-						log.Printf("<--- END BODY DEBUG msgid='%s'", msgid)
-
-
-					}
-					*/
-				}
-				//log.Printf("mbox2nntp msgid='%s' rcode=%d msg='%s'", msgid, rcode, msg)
-				//time.Sleep(5 * time.Second) // DEBUG_SLEEP
-			}
-			code = rcode
-
-		} else {
-			code = rcode
-			//log.Printf("Worker %d OK ihave sent msgid='%s' code=%d err='%v'", wid, msgid, code, err)
-
-		}
+		rcode, _, err := srvtp.ReadCodeLine(235)
+		code = responseCode(wid, msgid, rcode, err)
 	} else {
 		code = 235
 	}
@@ -1909,6 +1929,24 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 	//time.Sleep(100 * time.Millisecond) // DEBUG_SLEEP
 	return code
 } // end func ihave
+
+// responseCode turns a ReadCodeLine result into ihave's return code. A
+// *textproto.Error is the server answering with another code (435, 436,
+// 437, ...): return that code. Anything else is the connection failing
+// (EOF, reset, timeout, a garbled line). That used to come back as code 0,
+// which cost the article and kept the dead connection: return -999 so the
+// article is requeued on a new one.
+func responseCode(wid int, msgid string, code int, err error) int {
+	if err == nil {
+		return code
+	}
+	var perr *textproto.Error
+	if errors.As(err, &perr) {
+		return perr.Code
+	}
+	log.Printf("ERROR Worker %d ihave read failed msgid='%s' err='%v'", wid, msgid, err)
+	return -999
+}
 
 func hash256(astr string) string {
 	ahash := sha256.Sum256([]byte(astr))
