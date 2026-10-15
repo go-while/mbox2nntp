@@ -829,3 +829,34 @@ func TestSkipDirFile(t *testing.T) {
 		}
 	}
 }
+
+// TestReadFileHonoursDropBinary: the directory path dropped yEnc articles
+// even with .noDROPBINARY, which the mbox path honoured.
+func TestReadFileHonoursDropBinary(t *testing.T) {
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	worker_channel = make(chan *ArticleItem, 8)
+	defer func(v bool) { DROPBINARY = v }(DROPBINARY)
+
+	const article = "From: someone@example.invalid\n" +
+		"Subject: a binary\n" +
+		"Date: Mon, 30 Jun 2003 23:33:23 GMT\n" +
+		"Message-ID: <ybegin@test>\n" +
+		"\n" +
+		"=ybegin line=128 size=3 name=x.bin\n" +
+		"abc\n" +
+		"=yend size=3\n"
+	fp := filepath.Join(t.TempDir(), "123")
+	if err := os.WriteFile(fp, []byte(article), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	DROPBINARY = true
+	if msgid := read_file(fp); msgid != "" || len(worker_channel) != 0 {
+		t.Fatalf("DROPBINARY: read_file = %q, queued %d; want dropped", msgid, len(worker_channel))
+	}
+	DROPBINARY = false
+	if msgid := read_file(fp); msgid != "<ybegin@test>" || len(worker_channel) != 1 {
+		t.Fatalf("noDROPBINARY: read_file = %q, queued %d; want sent", msgid, len(worker_channel))
+	}
+}

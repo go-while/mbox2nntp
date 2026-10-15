@@ -24,7 +24,6 @@ import (
 	"sync"
 	"time"
 	//"runtime"
-	"unicode"
 	//"math/rand"
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	"github.com/dlclark/regexp2"
@@ -71,17 +70,10 @@ var (
 	// failed connection; after that it counts as an error.
 	MAX_TRIES = 10
 	retryDelay = time.Second // backoff unit between tries
-	addedgroups = make(map[string]bool)
-	nntpdup435 = 0
-	nntp437 = 0
-	sentcnt, errcnt = 0, 0
 	DRYRUN                  bool
-	PREFIX                  string
 	globalBools             tsm_GlobalBools.GlobalBools
 	globalCounter           GlobalCounter
 	worker_channel          chan *ArticleItem
-	notify_chan             chan struct{}
-	regex_isAlphaNumStart   = regexp2.MustCompile(`^[A-Za-z0-9]`, 0)
 	regex_isbaddateline   = regexp2.MustCompile(`^[A-Z][a-z][a-z],\ `, 0)
 )
 
@@ -571,28 +563,7 @@ func mvmbox(mboxfile string) {
 	}
 } // end func mvmbox
 
-func inn2AddGroup(group string) {
-	if addedgroups[group] {
-		log.Printf("inn2AddGroup added before group'%s'", group)
-		return
-	}
-	cmd := exec.Command("/usr/sbin/ctlinnd", "newgroup", group)
-	_ = cmd.Run()
-	addedgroups[group] = true
-	/*
-	if err != nil {
-		log.Printf("inn2AddGroup failed group='%s' err='%v'", group, err)
-		os.Exit(1)
-	}
-	*/
-} // end func inn2AddGroup
-
 func read_file(file_path string) string {
-	/*
-	if !test_first_byte(file_path, "what>32") {
-		return ""
-	}
-	*/
 
 	lines, err0 := ioutil.ReadFile(file_path)
 	if err0 != nil {
@@ -711,7 +682,7 @@ func read_file(file_path string) string {
 			*/
 			header = append(header, line)
 		} else {
-			if strings.HasPrefix(line, "=ybegin") {
+			if DROPBINARY && strings.HasPrefix(line, "=ybegin") {
 				log.Printf("DROP BINARY file='%s'", file_path)
 				return ""
 			}
@@ -820,7 +791,6 @@ func main() {
 	globalBools = tsm_GlobalBools.GlobalBools{V: make(map[string]bool)}
 	globalCounter = GlobalCounter{v: make(map[string]int)}
 	worker_channel = make(chan *ArticleItem, WORKER_CHAN_SIZE)
-	notify_chan = make(chan struct{}, 1)
 	globalCounter.initCounter("worker_done")
 
 	mboxfile := ""
@@ -860,12 +830,9 @@ func main() {
 
 		log.Printf("DRYRUN=%t", DRYRUN)
 
-		if len(os.Args) == 7 {
-			if os.Args[6] != "" {
-				PREFIX = os.Args[6]
-			}
-		}
-
+		// os.Args[6] was PREFIX, which nothing read (and which was only
+		// set when exactly 7 arguments were given). Its slot stays so
+		// that existing command lines keep working.
 		if len(os.Args) >= 8 {
 			if os.Args[7] != "" { // /path/to/.noDROPBINARY
 				if utils.FileExists(os.Args[7]) {
@@ -878,7 +845,10 @@ func main() {
 	}
 
 	if mboxfile == "" || nntpserv == "" || MaxWorkers <= 0 {
-		log.Printf("Usage: %s file.mbox[.gz|.zip] nntp.server:119 WORKERS TMPDIR DRYRUN", os.Args[0])
+		log.Printf("Usage: %s file.mbox[.gz|.zip|.7z]|file.bag|dir/ nntp.server:119 [WORKERS [TMPDIR [DRYRUN [- [/path/to/.noDROPBINARY]]]]]", os.Args[0])
+		log.Printf("  WORKERS: connections (default 1); TMPDIR: where archives are unpacked (default .)")
+		log.Printf("  DRYRUN: the literal word, or anything else to send; the sixth argument is unused")
+		log.Printf("  .noDROPBINARY: if this file exists, yEnc (=ybegin) articles are sent instead of dropped")
 		log.Printf("args: %v", os.Args)
 		os.Exit(1)
 	}
@@ -942,8 +912,6 @@ func main() {
 			os.Exit(1)
 		}
 	}
-
-	//inn2AddGroup(group)
 
 	log.Printf("process mboxfile='%s' group='%s'", mboxfile, group)
 	//os.Exit(1)
@@ -1011,56 +979,6 @@ func main() {
 func UnixTimeSec() int64 {
 	return time.Now().UnixNano() / 1e9
 }
-
-func test_first_byte(file_path string, what string) bool {
-	//return true
-	//log.Printf("test_first_byte fp='%s'", file_path)
-	//defer log.Printf("test_first_byte fp='%s' returned what='%s'", file_path, what)
-	// what = "From: "
-	// what = "what>32"
-	if file_handle, mmap_handle, err := utils.MMAP_FILE(file_path, "ro"); err == nil {
-		//log.Printf("TEST go")
-		/*
-		len_mmap := len(mmap_handle)
-		if len_mmap <= 6 { // "From: "
-			log.Printf("ERROR empty file? fp='%s' len=%d", file_path, len_mmap)
-			overview.MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-			return false
-		}
-		*/
-		switch(what) {
-			case "F":
-				//log.Printf("TEST is? 'F'")
-				if mmap_handle[0] == 'F' { // maybe is a msgid-file?
-					utils.MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-					return true
-					/*
-					astr := string(mmap_handle[0:5])
-					if astr == "From " {
-						//log.Printf("OK test_first_byte fp='%s' 'F'", file_path)
-						overview.MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-						return true
-					}*/
-				}
-			case "what>32":
-				//log.Printf("TEST is? 'A-Z'")
-				if mmap_handle[0] >= 'A' && mmap_handle[0] <= 'Z' { // is ascii?
-					//log.Printf("OK test_first_byte fp='%s' 'A-Z'", file_path)
-					utils.MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-					return true
-				}
-		}
-		log.Printf("ERROR file[0] ? fp='%s' f[0]='%s'=%d", file_path, string(mmap_handle[0]), mmap_handle[0])
-		utils.MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-	} else {
-		log.Printf("ERROR test_first_byte fp='%s' err='%v'", file_path, err)
-	}
-
-	//MMAP_CLOSE(file_path, file_handle, mmap_handle, "ro")
-	//time.Sleep(1 * time.Second)
-
-	return false
-} // end func test_first_byte
 
 //func proc(mboxfile string, is_zip bool, is_gzp bool, is_mbx bool, srvtp *textproto.Conn) string {
 func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, is_dir bool, is_bag bool) string {
@@ -1248,49 +1166,6 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	return mboxReader, src
 }
 
-func oldGetMessageID(imsgid string) (string, error) {
-	//log.Printf("DEBUG F) overview.GetMessageID: amsgidstr='%s'",amsgidstr)
-	//amsgidstr := headstring["Message-ID"]
-	//msgid := ""
-	lastInd := -1
-
-	msgid := strings.TrimSpace(imsgid)
-
-	if strings.Contains(msgid," ") {
-		if strings.HasPrefix(msgid, "<") && strings.HasSuffix(msgid, ">") {
-			//msgid = strings.Replace(msgid, " ", "", -1)
-			return msgid, nil
-		}
-		/*
-		log.Printf("DEBUG msgid contains space amsgidstr='%s'", msgid)
-		lastInd = strings.LastIndex(msgid, " ")
-		if lastInd != -1 {
-			msgid = string(msgid[:lastInd])
-		}
-		*/
-	}
-
-	if strings.HasSuffix(msgid,">#1/1") {
-		lastInd = strings.LastIndex(msgid, "#")
-
-		if lastInd != -1 {
-			msgid = string(msgid[:lastInd])
-		}
-
-	} else
-
-	if strings.HasPrefix(msgid, "<") && (strings.Contains(msgid,">?(")||strings.Contains(msgid,"> (")||strings.Contains(msgid,">(UMass-")||strings.Contains(msgid,">-(UMass-")) && strings.HasSuffix(msgid, ")") {
-		split := strings.Split(msgid, ">")
-		msgid = split[0] + ">"
-	}
-
-	if strings.HasPrefix(msgid, "<") && strings.HasSuffix(msgid, ">") {
-		//log.Printf("DEBUG F) return overview.GetMessageID msgid='%s'", msgid)
-		return msgid, nil
-	}
-	return "", fmt.Errorf("ERROR: overview.GetMessageID failed imsgid='%s'", imsgid)
-} // func oldGetMessageID
-
 //func iterateMbox(mboxReader *mbox.MboxStream, srvtp *textproto.Conn) {
 func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgNumber := 0
@@ -1400,7 +1275,6 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 	} // end for
 	//globalCounter.setCounter("msgnums", msgNumber)
-	//log.Printf("msgs=%d sent=%d errcnt=%d duplicate=%d rejected=%d", msgNumber, sentcnt, errcnt, nntpdup435, nntp437)
 	if !stoppedEarly {
 		if unread := unreadBytes(src); unread > 0 {
 			log.Printf("[iterateMbox] ERROR: mbox parser stopped early file='%s' msgNumber=%d unread_bytes=%d, not marking done", mboxfile, msgNumber, unread)
@@ -1585,29 +1459,8 @@ func worker(wid int) {
 	return
 } // end func worker
 
-func IsLetter(s string) bool {
-	for i, r := range s {
-		if unicode.IsLetter(r)||unicode.IsNumber(r)||unicode.IsSpace(r)||unicode.IsPunct(r)||r=='+'||r=='-'||r=='('||r==')' {
-			continue
-		} else {
-			log.Printf("F isLetter s='%s' r='%s' i=%d", s, string(r), i)
-			return false
-		}
-	}
-	return true
-}
-
 func isspace(b byte) bool {
 	return b < 33
-}
-
-func IsAlphaUpper(s string) bool {
-	for _, r := range s {
-		if r < 'A' || r > 'Z' {
-			return false
-		}
-	}
-	return true
 }
 
 func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *textproto.Conn, CliWriter *bufio.Writer) (int) {
@@ -1616,17 +1469,6 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		log.Printf("--> IHAVE --> msgid='%s' head=%d body=%d", msgid, len(head), len(bodylines))
 	}
 	*/
-	test_DRY_RUN := false
-	if test_DRY_RUN {
-		log.Printf("#### ihave --> msgid='%s'", msgid)
-		for i, line := range head {
-			fmt.Println("h=",i, "=", line)
-		}
-		for i, line := range bodylines {
-			fmt.Println("b=",i, "=", line)
-		}
-		return 435
-	}
 	//time.Sleep(10 * time.Second)
 
 
@@ -1803,7 +1645,6 @@ func cleanHeadline(line string) string {
 func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bool, code int) {
 	has_hdr_date := false
 
-	fix_msgid := false
 	try_fix_date := false
 	ignore_nextline := false
 	has_subj := false
@@ -1938,16 +1779,6 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 
 			// end endless if else header checks
 
-			// some weird articles in php.* have a message-id: <...@...> line following a spaced_line
-			/*
-			if !fix_msgid && spaced_prevline && spaced_nextline && header_key == "Message-ID" &&
-				strings.HasSuffix(header_dat, ">") {
-				//log.Printf("[%s/%s/%s/%d] ihave: [%s] | fixed msgid header spaced_prevline && spaced_nextline", s.sessionid, s.username, s.cmdstring, s.beconn.backendID, s.fakegroup)
-				fix_msgid = true
-				//time.Sleep(3 * time.Second)
-				continue
-			}
-			*/
 
 		} else {
 
@@ -1968,7 +1799,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 				if amsgid == msgid {
 					//log.Printf("Found msgid='%s' in messageids", msgid)
 					newhead = append(newhead, "Message-ID: "+msgid)
-					has_msgid, fix_msgid = true, false
+					has_msgid = true
 					found = true
 					break
 				}
@@ -1979,7 +1810,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 		} else
 		if messageids[0] == msgid {
 			newhead = append(newhead, "Message-ID: "+msgid)
-			has_msgid, fix_msgid = true, false
+			has_msgid = true
 		} else {
 			log.Printf("ERROR msgid='%s' no message-id header?!", msgid)
 		}
@@ -1994,7 +1825,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 		return nil, false, 437
 	}
 
-	if fix_msgid || !has_msgid {
+	if !has_msgid {
 		newhead = append(newhead, "Message-ID: "+msgid)
 	}
 

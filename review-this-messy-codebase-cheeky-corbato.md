@@ -701,7 +701,8 @@ against a real INN.
   never ran. If the tree ever becomes a nuisance, split those four helpers out of
   `nntp-overview` rather than patching around `nntp-storage`.
 
-- `mbox2nntp` (a 4.7 MB binary) is committed despite `.gitignore`. Remove it from the tree.
+- **RESOLVED — the committed `mbox2nntp` binary** is no longer tracked, and `.gitignore`
+  names `/mbox2nntp`.
 - **RESOLVED — `go vet ./...` is clean.** It had reported three `log.Printf` defects,
   all now fixed: a missing verb at `:687`, a missing argument at `:1426`, and a
   non-constant format string at `:830` — `log.Printf("cleanup: rm '"+tmpdir+"/"+mboxfile+"'")`,
@@ -712,18 +713,30 @@ against a real INN.
   `mbox2nntp.go:663-664`. Vet does *not* flag it — assigning a fresh composite literal
   whose `sync.Mutex` is at its zero value is not a lock copy. The code is fine as written.
 - `gofmt -l` flags the file. Run `gofmt -w`.
-- **Argument parsing**: `mbox2nntp.go:707` uses `if len(os.Args) == 7` for `PREFIX` while
+- **RESOLVED (kept positional) — argument parsing**: `mbox2nntp.go:707` uses `if len(os.Args) == 7` for `PREFIX` while
   the next block uses `>= 8`, so `PREFIX` is never set when 8 arguments are supplied. `PREFIX`
   is also never read anywhere. The usage string (line 725) omits arguments 6 and 7. Replace
   the positional chain with `flag`.
-- **`DROPBINARY` is not honoured on the directory path**: `mbox2nntp.go:553` drops `=ybegin`
-  unconditionally, while `mbox2nntp.go:1170` respects the flag.
-- **Dead code to delete**: `unrar` (never called), `test_first_byte` (only referenced from a
+
+  **Done differently:** `PREFIX` is deleted and its slot (argument 6) is documented as
+  unused, so existing command lines keep working. The usage message now lists every
+  argument, including `.noDROPBINARY`. Switching to `flag` would break every script that
+  calls the importer today, for no gain in behaviour, so it is left as an option.
+- **RESOLVED — `DROPBINARY` is not honoured on the directory path**: `mbox2nntp.go:553` drops `=ybegin`
+  unconditionally, while `mbox2nntp.go:1170` respects the flag. `read_file` now checks
+  `DROPBINARY` too; `TestReadFileHonoursDropBinary` covers both settings.
+- **RESOLVED — dead code to delete**: `unrar` (never called), `test_first_byte` (only referenced from a
   comment), `oldGetMessageID`, `IsLetter`, `IsAlphaUpper`, `inn2AddGroup` + `addedgroups`
   (unsynchronized map, never called), `notify_chan`, `requeue_channel`, `PREFIX`,
   `regex_isAlphaNumStart`, package-level `sentcnt`/`errcnt`/`nntpdup435`/`nntp437`,
   `fix_msgid`, `has_hdr_from`, `try_fix_date`, `nntp_posting_date`, and the `test_DRY_RUN`
   block at `mbox2nntp.go:1422`. Roughly 400 lines of commented-out code can go with them.
+
+  **Done:** all of these are gone, apart from three. `requeue_channel` already went with G.
+  `has_hdr_from` turned out to be live in `read_file`, where it synthesizes `From:`. The
+  `try_fix_date` / `nntp_posting_date` pair belongs to B4. The `unicode` import went with
+  `IsLetter`. The commented-out code is left alone, apart from blocks that referred to
+  deleted names: deleting the author's notes was not in scope.
 
 ---
 
