@@ -19,3 +19,10 @@
 
 # Go workspace file
 go.work
+
+# Compiled binary (same name as the module, so the rules above miss it)
+/mbox2nntp
+/data
+
+# Local corpus and working files (hundreds of MB, never belongs in the repo)
+/data/
