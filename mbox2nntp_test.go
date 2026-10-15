@@ -2,10 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -130,6 +134,7 @@ func TestIhaveBodyRoundTrip(t *testing.T) {
 // It also covers A2: the blank header/body separator must not become body[0].
 func TestReadFileTrailingPeriod(t *testing.T) {
 	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
 	worker_channel = make(chan *ArticleItem, 8)
 
 	const article = "From: someone@example.invalid\n" +
@@ -597,6 +602,141 @@ func TestWorkerGivesUpAfterMaxTries(t *testing.T) {
 	for name, want := range map[string]int{"sent": 0, "wnntperrcnt": 1, "msgnums": 0} {
 		if v := globalCounter.getCounter(name); v != want {
 			t.Errorf("counter %s = %d, want %d", name, v, want)
+		}
+	}
+}
+
+// walkFiles replaces /bin/find.sh, which was
+// `find "$1" -mindepth 1 -type f | sort -V`. Same files, same order.
+func TestWalkFilesMatchesFindSh(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not installed")
+	}
+	root := t.TempDir()
+	files := []string{
+		"comp/lang/go/1", "comp/lang/go/2", "comp/lang/go/10", "comp/lang/go/100",
+		"comp/lang/go/9", "comp/lang/go/.overview", "comp/lang/c/3", "comp/lang/c2/1",
+		"comp/lang/10", "comp/lang/2", "alt/a9", "alt/a10", "alt/a2b", "alt/b",
+		"alt/007", "alt/7", "alt/x.tar.gz", "alt/x", "alt/x~1", "alt/a.b", "alt/a/1",
+		"comp/lang/c++/5", "comp/lang/c.d/2", "comp/lang/c-x/1", "comp/lang/Z/1",
+		"comp/lang/go/1.1", "comp/lang/go/1.10", "comp/lang/go/1.2",
+	}
+	for _, f := range files {
+		p := filepath.Join(root, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// find -type f skips symlinks, and does not descend into linked dirs
+	os.Symlink(filepath.Join(root, "comp/lang/go/1"), filepath.Join(root, "alt/link"))
+	os.Symlink(filepath.Join(root, "comp"), filepath.Join(root, "alt/linkdir"))
+
+	out, err := exec.Command("sh", "-c", `find "$1" -mindepth 1 -type f | sort -V`, "sh", root).Output()
+	if err != nil {
+		t.Skipf("find | sort -V: %v", err)
+	}
+	want := strings.Split(strings.TrimSpace(string(out)), "\n")
+
+	var got []string
+	if err := walkFiles(root, func(p string) { got = append(got, p) }); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("walkFiles order differs from find.sh\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The usenet-* .mbox.gz archives hold one gzip member per article.
+func TestGunzipToConcatenatedMembers(t *testing.T) {
+	dir := t.TempDir()
+	var gz bytes.Buffer
+	for _, part := range []string{"From a\nfirst\n", "From b\nsecond\n"} {
+		w := gzip.NewWriter(&gz)
+		w.Write([]byte(part))
+		w.Close()
+	}
+	src := filepath.Join(dir, "x.mbox.gz")
+	if err := os.WriteFile(src, gz.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(dir, "x.mbox")
+	if err := gunzipTo(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if want := "From a\nfirst\nFrom b\nsecond\n"; string(got) != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestExtractedPathAndArgPath(t *testing.T) {
+	saved := tmpdir
+	t.Cleanup(func() { tmpdir = saved })
+	for _, tc := range []struct{ tmp, archive, ext, want string }{
+		{".", "x.mbox.gz", ".gz", "x.mbox"},
+		{".", "/abs/dir/x.mbox.zip", ".zip", "x.mbox"},
+		{"/var/tmp/m2n", "/abs/dir/x.mbox.zip", ".zip", "/var/tmp/m2n/x.mbox"},
+		{"/var/tmp/m2n/", "rel/dir/a.(1).mbox.7z", ".7z", "/var/tmp/m2n/a.(1).mbox"},
+		{"/var/tmp/m2n", "x.gz.mbox.gz", ".gz", "/var/tmp/m2n/x.gz.mbox"},
+	} {
+		tmpdir = tc.tmp
+		if got := extractedPath(tc.archive, tc.ext); got != tc.want {
+			t.Errorf("extractedPath(%q, %q) with tmpdir %q = %q, want %q", tc.archive, tc.ext, tc.tmp, got, tc.want)
+		}
+	}
+	for in, want := range map[string]string{"-rf.mbox": "./-rf.mbox", "a.mbox": "a.mbox", "/x/-y": "/x/-y"} {
+		if got := argPath(in); got != want {
+			t.Errorf("argPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// Generated names against the real find | sort -V, fixed seeds.
+func TestWalkFilesMatchesFindShGenerated(t *testing.T) {
+	if _, err := exec.LookPath("find"); err != nil {
+		t.Skip("find not installed")
+	}
+	const alphabet = "0123456789ab.~-+Z_"
+	for seed := int64(1); seed <= 20; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		name := func() string {
+			b := make([]byte, 1+rng.Intn(6))
+			for i := range b {
+				b[i] = alphabet[rng.Intn(len(alphabet))]
+			}
+			if b[0] == '-' || string(b) == "." || string(b) == ".." {
+				b[0] = 'a'
+			}
+			return string(b)
+		}
+		root := t.TempDir()
+		dirs := []string{root}
+		for i := 0; i < 60; i++ {
+			parent := dirs[rng.Intn(len(dirs))]
+			p := filepath.Join(parent, name())
+			if rng.Intn(4) == 0 {
+				if os.Mkdir(p, 0755) == nil {
+					dirs = append(dirs, p)
+				}
+				continue
+			}
+			if _, err := os.Stat(p); err == nil {
+				continue
+			}
+			os.WriteFile(p, nil, 0644)
+		}
+		out, err := exec.Command("sh", "-c", `find "$1" -mindepth 1 -type f | sort -V`, "sh", root).Output()
+		if err != nil {
+			t.Skipf("find | sort -V: %v", err)
+		}
+		want := strings.TrimSpace(string(out))
+		var got []string
+		walkFiles(root, func(p string) { got = append(got, p) })
+		if strings.Join(got, "\n") != want {
+			t.Errorf("seed %d: walkFiles order differs from find.sh\ngot:\n%s\nwant:\n%s", seed, strings.Join(got, "\n"), want)
 		}
 	}
 }

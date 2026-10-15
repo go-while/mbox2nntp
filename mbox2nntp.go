@@ -7,6 +7,7 @@ import (
 	"errors"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"fmt"
 	"path/filepath"
 	"io"
@@ -18,6 +19,7 @@ import (
 	"os/exec"
 	"strings"
 	//"regexp"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -271,45 +273,158 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
-func unrar(mboxfile string) {
-	var err error
-	var cmd *exec.Cmd
-	if tmpdir == "." {
-		cmd = exec.Command("/usr/bin/unrar6", "x", mboxfile)
-	}else{
-		log.Printf("unrar %s to %s", mboxfile, tmpdir)
-		//ctmpdir := fmt.Sprintf("-d %s", tmpdir)
-		cmd = exec.Command("/usr/bin/unrar6", "x", mboxfile, tmpdir)
+// argPath keeps a file name from being read as an option by an external
+// tool: a relative name starting with '-' gets a "./" prefix.
+func argPath(p string) string {
+	if strings.HasPrefix(p, "-") {
+		return "./" + p
 	}
+	return p
+}
 
-	err = cmd.Run()
+// walkFiles calls fn for every regular file under dir, in the order
+// find.sh gave: `find "$1" -mindepth 1 -type f | sort -V`. Each directory
+// is read and sorted on its own (versionLess), then walked depth-first,
+// which reproduces sort -V over the full paths without holding them all.
+// Symlinks are not followed and unreadable directories are logged and
+// skipped, as find does.
+func walkFiles(dir string, fn func(path string)) error {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Printf("unrar failed mboxfile='%s' err='%v' =exit(1)", mboxfile, err)
-		os.Exit(1)
+		return err
 	}
-} // end func unrar
-
-func unzip(mboxfile string) {
-	var err error
-	var cmd *exec.Cmd
-	if tmpdir == "." {
-		cmd = exec.Command("/usr/bin/unzip", "-n", mboxfile)
-	}else{
-
-		log.Printf("unzip %s to %s", mboxfile, tmpdir)
-		//ctmpdir := fmt.Sprintf("-d %s", tmpdir)
-		cmd = exec.Command("/usr/bin/unzip", "-n", "-d", tmpdir, mboxfile)
-
-		/*
-		if strings.HasSuffix(tmpdir, "/") {
-			mboxfile = tmpdir + mboxfile
-		} else {
-			mboxfile = tmpdir + "/" + mboxfile
+	// In the full paths sort -V compares, a directory's name is followed
+	// by its "/".
+	key := func(e os.DirEntry) string {
+		if e.IsDir() {
+			return e.Name() + "/"
 		}
-		*/
+		return e.Name()
 	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return versionLess(key(entries[i]), key(entries[j]))
+	})
+	for _, e := range entries {
+		p := filepath.Join(dir, e.Name())
+		switch {
+		case e.IsDir():
+			if err := walkFiles(p, fn); err != nil {
+				log.Printf("ERROR dir walk '%s': %v", p, err)
+			}
+		case e.Type().IsRegular():
+			fn(p)
+		}
+	}
+	return nil
+}
 
-	err = cmd.Run()
+// versionLess orders two names of one directory as GNU sort -V orders the
+// full paths: gnulib filevercmp, i.e. verrevcmp without the file suffixes
+// first, then with them, then plain bytes as sort's last resort. Digit
+// runs compare by value, so article 2 comes before article 10.
+func versionLess(a, b string) bool {
+	pa, pb := suffixStart(a), suffixStart(b)
+	r := verrevcmp(a[:pa], b[:pb])
+	if r == 0 && (pa != len(a) || pb != len(b)) {
+		r = verrevcmp(a, b)
+	}
+	if r == 0 {
+		return a < b
+	}
+	return r < 0
+}
+
+// suffixStart is gnulib's file_prefixlen: where a trailing run of
+// suffixes like ".tar.gz" (dot, letter or '~', then letters, digits, '~')
+// starts. A suffix may start at s[0] (".overview"): in the full path that
+// gnulib sees, a '/' precedes the name.
+func suffixStart(s string) int {
+	isAlpha := func(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+	prefix := 0
+	for i := 0; i < len(s); {
+		if s[i] == '.' && i+1 < len(s) && (isAlpha(s[i+1]) || s[i+1] == '~') {
+			for i += 2; i < len(s) && (isAlpha(s[i]) || isDigit(s[i]) || s[i] == '~'); i++ {
+			}
+			continue
+		}
+		i++
+		prefix = i
+	}
+	return prefix
+}
+
+// verrevcmp is gnulib's: non-digit runs compare by verOrder, digit runs
+// by value with leading zeros skipped.
+func verrevcmp(a, b string) int {
+	i, j := 0, 0
+	for i < len(a) || j < len(b) {
+		for (i < len(a) && !isDigit(a[i])) || (j < len(b) && !isDigit(b[j])) {
+			ca, cb := 0, 0
+			if i < len(a) {
+				ca = verOrder(a[i])
+			}
+			if j < len(b) {
+				cb = verOrder(b[j])
+			}
+			if ca != cb {
+				return ca - cb
+			}
+			i++
+			j++
+		}
+		for i < len(a) && a[i] == '0' {
+			i++
+		}
+		for j < len(b) && b[j] == '0' {
+			j++
+		}
+		firstDiff := 0
+		for i < len(a) && j < len(b) && isDigit(a[i]) && isDigit(b[j]) {
+			if firstDiff == 0 {
+				firstDiff = int(a[i]) - int(b[j])
+			}
+			i++
+			j++
+		}
+		if i < len(a) && isDigit(a[i]) {
+			return 1
+		}
+		if j < len(b) && isDigit(b[j]) {
+			return -1
+		}
+		if firstDiff != 0 {
+			return firstDiff
+		}
+	}
+	return 0
+}
+
+func verOrder(c byte) int {
+	switch {
+	case isDigit(c):
+		return 0
+	case c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z':
+		return int(c)
+	case c == '~':
+		return -1
+	}
+	return int(c) + 256
+}
+
+func isDigit(c byte) bool { return c >= '0' && c <= '9' }
+
+// extractedPath is where an archive's mbox is unpacked to: tmpdir, under
+// the archive's base name without ext. Every extractor writes there.
+func extractedPath(archive, ext string) string {
+	return filepath.Join(tmpdir, strings.TrimSuffix(filepath.Base(archive), ext))
+}
+
+// unzip and unzip7 overwrite: a file left by an interrupted run may be
+// truncated, and must not be imported in place of the real one.
+func unzip(mboxfile string) {
+	log.Printf("unzip %s to %s", mboxfile, tmpdir)
+	cmd := exec.Command("/usr/bin/unzip", "-o", "-d", tmpdir, argPath(mboxfile))
+	err := cmd.Run()
 	if err != nil {
 		log.Printf("unzip failed mboxfile='%s' err='%v' =exit(1)", mboxfile, err)
 		os.Exit(1)
@@ -317,54 +432,52 @@ func unzip(mboxfile string) {
 } // end func unzip
 
 func unzip7(mboxfile string) {
-	var err error
-	var cmd *exec.Cmd
-
-	if tmpdir == "." {
-		cmd = exec.Command("/usr/bin/7z", "x", mboxfile, "-y")
-	} else {
-
-		log.Printf("unzip7 %s to %s", mboxfile, tmpdir)
-		tmpstr := "-o"+tmpdir
-		cmd = exec.Command("/usr/bin/7z", "x", tmpstr, mboxfile, "-y")
-	}
-
-	err = cmd.Run()
+	log.Printf("unzip7 %s to %s", mboxfile, tmpdir)
+	cmd := exec.Command("/usr/bin/7z", "x", "-o"+tmpdir, "-y", argPath(mboxfile))
+	err := cmd.Run()
 	if err != nil {
 		log.Printf("unzip7 failed mboxfile='%s' err='%v' =exit(1)", mboxfile, err)
 		os.Exit(1)
 	}
-} // end func unzip
+} // end func unzip7
 
-func gunzip(mboxfile string) {
-	var err error
-	var cmd *exec.Cmd
-	var out bytes.Buffer
-
-	if tmpdir == "." {
-		cmd = exec.Command("/bin/gzip", "--force", "--decompress", "--keep", mboxfile)
-	} else {
-		tmboxfile := strings.Replace(mboxfile, ".gz", "", -1)
-		tpath := tmpdir + "/" + tmboxfile
-		//args := []string{"-v", mboxfile,">",tpath}
-		log.Printf("gunzip %s to %s/%s tpath=%s", mboxfile, tmpdir, tmboxfile, tpath)
-		//cmd = exec.Command("/bin/gzip", "--decompress", "--keep", "--stdout", mboxfile, ">", tpath)
-
-		cmd = exec.Command("/scripts/gunzip.sh", mboxfile, tpath)
-		cmd.Stdout = &out
-	}
-	err = cmd.Run()
+// gunzip decompresses archive to dst in-process. It used to run gzip, or
+// /scripts/gunzip.sh when a tmpdir was set, a script that is not in the
+// repository. compress/gzip reads concatenated members as one stream, as
+// the usenet-* archives need: they hold one gzip member per article.
+func gunzip(archive, dst string) {
+	log.Printf("gunzip %s to %s", archive, dst)
+	err := gunzipTo(archive, dst)
 	if err != nil {
-		log.Printf("gunzip failed mboxfile='%s' err='%v' stdout='%s'", mboxfile, err, out.String())
+		log.Printf("gunzip failed mboxfile='%s' err='%v'", archive, err)
+		os.Remove(dst)
 		os.Exit(1)
-	}/* else {
-		log.Printf("gunziped mboxfile='%s' stdout='%s'", mboxfile, err, out.String())
-	}*/
-} // end func unzip
+	}
+} // end func gunzip
+
+func gunzipTo(archive, dst string) error {
+	in, err := os.Open(archive)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	zr, err := gzip.NewReader(bufio.NewReaderSize(in, 1024*1024))
+	if err != nil {
+		return err
+	}
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, zr); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
 
 func rmmbox(mboxfile string) {
-	cmd := exec.Command("/bin/rm", mboxfile)
-	err := cmd.Run()
+	err := os.Remove(mboxfile)
 	if err != nil {
 		log.Printf("rmmbox failed mboxfile='%s' err='%v'", mboxfile, err)
 		os.Exit(1)
@@ -433,7 +546,7 @@ func dos2unix(mboxfile string) {
 		return
 	}
 	log.Printf("proc dos2unix %s", mboxfile)
-	cmd := exec.Command(DOS2UNIX, "-f", mboxfile)
+	cmd := exec.Command(DOS2UNIX, "-f", argPath(mboxfile))
 	err := cmd.Run()
 	if err != nil {
 		log.Printf("dos2unix failed mboxfile='%s' err='%v'", mboxfile, err)
@@ -447,8 +560,7 @@ func mvmbox(mboxfile string) {
 		return
 	}
 	mmboxfile := fmt.Sprintf("%s.done",mboxfile)
-	cmd := exec.Command("/bin/mv", mboxfile, mmboxfile)
-	err := cmd.Run()
+	err := os.Rename(mboxfile, mmboxfile)
 	if err != nil {
 		log.Printf("mvmbox failed mboxfile='%s' err='%v'", mboxfile, err)
 		os.Exit(1)
@@ -678,6 +790,7 @@ func read_file(file_path string) string {
 	if queued > markhi {
 		globalBools.SetGB("process", true)
 	}
+	globalCounter.incCounter(0, "msgnums")
 	worker_channel <- &ArticleItem{msgid: msgid, head: header, body: body}
 	return msgid
 } // end read_file
@@ -880,9 +993,12 @@ func main() {
 	if is_zip || is_zip7 || is_gzp || is_bag {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)
-			if utils.FileExists(tmpdir+"/"+mboxfile) {
-				log.Printf("cleanup: rm '%s/%s'", tmpdir, mboxfile)
-				rmmbox(tmpdir+"/"+mboxfile)
+			// proc returned the extracted file's path. Only an archive has
+			// one: for a .bag it is the source itself, which the old
+			// tmpdir+"/"+name check removed whenever the run was not done.
+			if (is_zip || is_zip7 || is_gzp) && utils.FileExists(mboxfile) {
+				log.Printf("cleanup: rm '%s'", mboxfile)
+				rmmbox(mboxfile)
 			}
 		}
 	} else
@@ -899,19 +1015,6 @@ func main() {
 func UnixTimeSec() int64 {
 	return time.Now().UnixNano() / 1e9
 }
-
-func make_mboxfilefiletrim(mboxfiletrim string) string {
-	if tmpdir == "." {
-		return mboxfiletrim
-	} else {
-		if strings.HasSuffix(tmpdir, "/") {
-			return tmpdir + mboxfiletrim
-		} else {
-			return tmpdir + "/" + mboxfiletrim
-		}
-	}
-} // end make_mboxfilefiletrim
-
 
 func test_first_byte(file_path string, what string) bool {
 	//return true
@@ -978,8 +1081,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	if (is_zip) {
 		// mbox is zip
 		unzip(mboxfile)
-		mboxfiletrim = strings.TrimSuffix(mboxfile, ".zip")
-		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
+		mboxfiletrim = extractedPath(mboxfile, ".zip")
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -991,9 +1093,8 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	} else
 	if (is_gzp) {
 		// mbox is gzip
-		gunzip(mboxfile)
-		mboxfiletrim = strings.TrimSuffix(mboxfile, ".gz")
-		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
+		mboxfiletrim = extractedPath(mboxfile, ".gz")
+		gunzip(mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("gunzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -1005,8 +1106,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	if (is_zip7) {
 		// mbox is 7z
 		unzip7(mboxfile)
-		mboxfiletrim = strings.TrimSuffix(mboxfile, ".7z")
-		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
+		mboxfiletrim = extractedPath(mboxfile, ".7z")
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped 7z '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -1016,22 +1116,14 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		reader, src = openMboxFile(mboxfiletrim)
 	} else
 	if (is_dir) {
-		c := exec.Command("/bin/find.sh", mboxfile)
-		output, err := c.Output()
-		if err != nil {
-			log.Fatalf("err=%v", err)
-		}
-		files := strings.Split(string(output), "\n")
-		totf := len(files)
-		log.Printf("dir=%s files=%d", mboxfile, totf)
-		//time.Sleep(1 * time.Second)
-		t, badfiles := 0, 0
-		globalCounter.setCounter("msgnums", totf)
-		//globalBools.SetGB("process", true)
-		for i, fp := range files {
+		// was /bin/find.sh (find -type f | sort -V), whose output was
+		// buffered whole and split on "\n" before any work started
+		log.Printf("dir=%s", mboxfile)
+		t, totf, badfiles := 0, 0, 0
+		werr := walkFiles(mboxfile, func(fp string) {
+			totf++
 			badfile := false
 			fpl := strings.ToLower(fp)
-			//log.Printf("@file %d / %d) fp='%s'", i+1, totf, fp)
 			if strings.Contains(fpl, ")") { badfile = true }
 			if strings.Contains(fpl, "/patch") { badfile = true }
 			if strings.HasSuffix(fpl, "/index") { badfile = true }
@@ -1054,23 +1146,23 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 			if strings.HasSuffix(fpl, ".overview") { badfile = true }
 			if strings.HasSuffix(fpl, ".xover") { badfile = true }
 			if strings.HasSuffix(fpl, ".msgids") { badfile = true }
-			if fp == "" { badfile = true }
 			if badfile {
 				badfiles++
-				continue
+				return
 			}
 			msgid := read_file(fp)
 			if msgid == "" {
 				badfiles++
 			}
 			if t >= 1000 {
-				log.Printf("read %d/%d dir='%s' queue=%d", i+1, totf, mboxfile, len(worker_channel))
+				log.Printf("read %d dir='%s' queue=%d", totf, mboxfile, len(worker_channel))
 				t = 0
 			}
 			t++
-			//time.Sleep(1 * time.Second)
+		})
+		if werr != nil {
+			log.Printf("ERROR dir walk '%s': %v", mboxfile, werr)
 		}
-		globalCounter.subCounter(0, "msgnums", badfiles)
 		globalBools.SetGB("process", true)
 		globalBools.SetGB("feeder_done", true)
 		log.Printf("mbox2nntp done is_dir reading totalfiles=%d badfiles=%d", totf, badfiles)

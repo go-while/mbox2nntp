@@ -490,16 +490,11 @@ The clean gz run (`0.akita-inu.20140617.mbox.gz`) is unchanged: 1,465 sent, 2 re
 
 ## F. Path / cleanup bugs
 
-- **`mbox2nntp.go:375`** — `mvmbox(zip)` inside the `has_zip7` branch; should be
-  `mvmbox(zip7)`. The `.7z` archive is never marked done and the `.zip` is renamed twice.
-- **`mbox2nntp.go:1033`** — `if (is_zip || is_gzp)` omits `is_zip7`, so `proc` returns the
-  original `.7z` path instead of `mboxfiletrim`. Downstream logging and cleanup then act on
-  the wrong file.
-- **`mbox2nntp.go:827`** — `utils.FileExists(tmpdir + "/" + mboxfile)` where `mboxfile` is
+- *(FIXED)* **`mbox2nntp.go:827`** — `utils.FileExists(tmpdir + "/" + mboxfile)` where `mboxfile` is
   the value returned by `proc`, which already went through `make_mboxfilefiletrim` and is
   tmpdir-prefixed. The result is `tmpdir/tmpdir/name`, so **when `TMPDIR != "." the
   decompressed mbox is never deleted** — this is the "temp dir fills up" failure.
-- **`mbox2nntp.go:925`, `940`, `954`** — `strings.TrimSuffix(mboxfile, ".zip")` keeps the
+- *(FIXED)* **`mbox2nntp.go:925`, `940`, `954`** — `strings.TrimSuffix(mboxfile, ".zip")` keeps the
   source directory component, and `make_mboxfilefiletrim` then prepends `tmpdir`, producing
   `tmpdir//abs/path/to/foo.mbox`. Use `filepath.Base` before joining, and use
   `filepath.Join`. `gunzip` (line 315) additionally uses
@@ -511,11 +506,11 @@ The clean gz run (`0.akita-inu.20140617.mbox.gz`) is unchanged: 1,465 sent, 2 re
   a no-op on the archive.org names at best, and an abort at worst. Content is deliberately
   not transcoded in its place: articles go out byte for byte and each declares its own
   charset in `Content-Type`, which a UTF-8 conversion would make false.
-- **`exec.Command("/bin/rm", mboxfile)`** (line 334), `/bin/mv` (line 404), and the
+- *(FIXED)* **`exec.Command("/bin/rm", mboxfile)`** (line 334), `/bin/mv` (line 404), and the
   unzip/gunzip calls pass filenames without a `--` separator. A file named `-rf` or
   `--help` is interpreted as a flag. Add `--`, or replace `rm`/`mv` with `os.Remove` /
   `os.Rename`.
-- **`mbox2nntp.go:966-971`** — `/bin/find.sh` output is buffered whole via `c.Output()` and
+- *(FIXED)* **`mbox2nntp.go:966-971`** — `/bin/find.sh` output is buffered whole via `c.Output()` and
   split on `"\n"`. For a multi-million-file spool this is hundreds of MB resident before
   any work starts, and filenames containing newlines break the split. Replace with
   `filepath.WalkDir`, which also removes the external script dependency.
@@ -527,6 +522,46 @@ The clean gz run (`0.akita-inu.20140617.mbox.gz`) is unchanged: 1,465 sent, 2 re
 - **`mboxhasZ` moves `.zip` for a `.7z`** *(FIXED)*. Copy-paste: `if has_zip7 {
   mvmbox(zip) }`. For a plain `.mbox` with its `.7z` beside it, `mv` fails on the missing
   `.zip` and `mvmbox` exits 1 at the end of an otherwise complete run.
+
+
+**How the rest of F was fixed:**
+
+- **Extraction paths.** Everything unpacks into `tmpdir` (default `.`) under the archive's
+  base name: `extractedPath(archive, ext)` = `filepath.Join(tmpdir,
+  TrimSuffix(Base(archive), ext))`. `proc` returns that path, and `main` removes exactly
+  that file. Two behaviour changes come with this:
+  - A gz archive used to unpack beside its source when tmpdir was `.`, while zip and 7z
+    unpacked into the working directory. Now all three go to tmpdir.
+  - `unzip -n` (never overwrite) is now `-o`. A file left by an interrupted run may be
+    truncated, and `-n` would have imported it. 7z already used `-y`.
+- **Cleanup never touches a source.** The old `tmpdir+"/"+name` check also matched a
+  plain `.bag` source, and deleted it whenever a run ended with no NNTP errors but was not
+  marked done. Cleanup now runs only for zip, gz and 7z.
+- **gunzip is in-process** (`compress/gzip`), which handles the usenet-* multi-member
+  archives. The tmpdir branch called `/scripts/gunzip.sh`, which is in neither the repo nor
+  on the test machine.
+- **`rm`/`mv` are now `os.Remove`/`os.Rename`.** Every file name still passed to an
+  external tool (unzip, 7z, dos2unix) goes through `argPath`, which prefixes `./` to names
+  starting with `-`. `unrar` was never called and is deleted.
+- **`find.sh` is replaced by `walkFiles`.** `find.sh` was `find "$1" -mindepth 1 -type f |
+  sort -V`, so the order matters: numeric, article 2 before 10. `walkFiles` reads and sorts
+  one directory at a time with a port of gnulib's `filevercmp`/`verrevcmp`, and walks
+  depth-first. That reproduces `sort -V` over the full paths without holding them all.
+  Like `find`, it does not follow symlinks and skips unreadable directories.
+  `TestWalkFilesMatchesFindSh` (hand-picked edge cases) and
+  `TestWalkFilesMatchesFindShGenerated` (20 seeded random trees) compare it against the
+  real pipeline byte for byte. `read_file` now counts what it queues in `msgnums`,
+  replacing the old preset to the total file count.
+
+End to end, with a separate tmpdir and the archive in another directory:
+
+| input | HEAD before the fix | fixed |
+|---|---|---|
+| `0.akita-inu.20140617.mbox.gz` | exit 1: `/scripts/gunzip.sh` missing | 1,465 sent, tmpdir empty, `.done` |
+| `clari.world.mideast.palestine.mbox.zip` | exit 1: wrong path, extracted file left in tmpdir | 1,414 sent, tmpdir empty, `.done` |
+| `0.akita-inu.(1825).mbox.7z` | exit 1: wrong path, extracted file left in tmpdir | 1,545 sent, tmpdir empty, `.done` |
+| `-dash.mbox.zip` | exit 1: unzip took the name as options | 1,414 sent, `.done` |
+| the gz turned into a spool dir, one worker | cannot run (`/bin/find.sh` missing) | 1,467 sent, in numeric file order |
 
 ---
 
