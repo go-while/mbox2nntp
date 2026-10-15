@@ -219,18 +219,6 @@ func connectBackend(rserver string) (*textproto.Conn, *bufio.Writer, error) {
 }
 
 
-func convert(mboxfile string) {
-	if fileExists(".nodos2unix") {
-		return
-	}
-	cmd := exec.Command("/usr/bin/convmv", "--notest","-f ISO-8859-1", "-t UTF-8", mboxfile)
-	err := cmd.Run()
-	if err != nil {
-		log.Printf("convert failed mboxfile='%s' err='%v'", mboxfile, err)
-		os.Exit(1)
-	}
-}
-
 func fileExists(filename string) bool {
 	info, err := os.Stat(filename)
 	if err != nil {
@@ -383,12 +371,26 @@ func mboxhasZ(mboxfile string) bool {
 	return false
 } // end func mboxhasZ
 
+const DOS2UNIX = "/usr/bin/dos2unix"
+
+// checkExecutable returns why path cannot be run, or nil.
+func checkExecutable(path string) error {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() || fi.Mode()&0111 == 0 {
+		return fmt.Errorf("%s is not an executable file", path)
+	}
+	return nil
+}
+
 func dos2unix(mboxfile string) {
 	if fileExists(".nodos2unix") {
 		return
 	}
 	log.Printf("proc dos2unix %s", mboxfile)
-	cmd := exec.Command("/usr/bin/dos2unix", "-f", mboxfile)
+	cmd := exec.Command(DOS2UNIX, "-f", mboxfile)
 	err := cmd.Run()
 	if err != nil {
 		log.Printf("dos2unix failed mboxfile='%s' err='%v'", mboxfile, err)
@@ -780,6 +782,15 @@ func main() {
 		os.Exit(1)
 	}
 
+	// dos2unix runs on every mbox (not on a directory). Check for it now,
+	// before anything is unpacked, instead of failing after the unzip.
+	if !is_dir && !fileExists(".nodos2unix") {
+		if err := checkExecutable(DOS2UNIX); err != nil {
+			log.Printf("ERROR: dos2unix is required: %v (install it, or create .nodos2unix to run without it)", err)
+			os.Exit(1)
+		}
+	}
+
 	//inn2AddGroup(group)
 
 	log.Printf("process mboxfile='%s' group='%s'", mboxfile, group)
@@ -912,13 +923,13 @@ func test_first_byte(file_path string, what string) bool {
 //func proc(mboxfile string, is_zip bool, is_gzp bool, is_mbx bool, srvtp *textproto.Conn) string {
 func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, is_dir bool, is_bag bool) string {
 	var reader *mbox.MboxStream
+	var src *eofReader
 	mboxfiletrim := ""
 
 	if (!is_zip && !is_zip7 && !is_gzp && !is_dir && (is_mbx || is_bag)) {
 		dos2unix(mboxfile)
-		convert(mboxfile)
 		//time.Sleep(5 * time.Second)
-		reader = openMboxFile(mboxfile)
+		reader, src = openMboxFile(mboxfile)
 
 	} else
 	if (is_zip) {
@@ -927,13 +938,12 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		mboxfiletrim = strings.TrimSuffix(mboxfile, ".zip")
 		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
 		dos2unix(mboxfiletrim)
-		convert(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
 			os.Exit(1)
 		}
 		log.Printf("unzipped '%s' to '%s'", mboxfile, mboxfiletrim)
-		reader = openMboxFile(mboxfiletrim)
+		reader, src = openMboxFile(mboxfiletrim)
 
 	} else
 	if (is_gzp) {
@@ -942,13 +952,12 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		mboxfiletrim = strings.TrimSuffix(mboxfile, ".gz")
 		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
 		dos2unix(mboxfiletrim)
-		convert(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("gunzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
 			os.Exit(1)
 		}
 		log.Printf("gunzipped '%s' to '%s'", mboxfile, mboxfiletrim)
-		reader = openMboxFile(mboxfiletrim)
+		reader, src = openMboxFile(mboxfiletrim)
 	} else
 	if (is_zip7) {
 		// mbox is 7z
@@ -956,13 +965,12 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		mboxfiletrim = strings.TrimSuffix(mboxfile, ".7z")
 		mboxfiletrim = make_mboxfilefiletrim(mboxfiletrim)
 		dos2unix(mboxfiletrim)
-		convert(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped 7z '%s' but not found '%s'", mboxfile, mboxfiletrim)
 			os.Exit(1)
 		}
 		log.Printf("unzipped 7z '%s' to '%s'", mboxfile, mboxfiletrim)
-		reader = openMboxFile(mboxfiletrim)
+		reader, src = openMboxFile(mboxfiletrim)
 	} else
 	if (is_dir) {
 		c := exec.Command("/bin/find.sh", mboxfile)
@@ -1032,11 +1040,22 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 
 	//iterateMbox(reader, srvtp)
 
+	if reader == nil {
+		// empty mbox: done, so it is moved aside like any finished file
+		globalBools.SetGB("process", true)
+		globalBools.SetGB("feeder_done", true)
+		globalBools.SetGB("done", true)
+		if (is_zip || is_gzp){
+			return mboxfiletrim
+		}
+		return mboxfile
+	}
+
 	if (is_zip || is_gzp){
-		iterateMbox(reader,mboxfiletrim)
+		iterateMbox(reader,src,mboxfiletrim)
 		return mboxfiletrim
 	}
-	iterateMbox(reader,mboxfile)
+	iterateMbox(reader,src,mboxfile)
 	return mboxfile
 }
 
@@ -1048,19 +1067,53 @@ func dirExists(dir string) bool {
 	return info.IsDir()
 }
 
-func openMboxFile(mboxfile string) (*mbox.MboxStream) {
+// eofReader remembers whether its source has reported io.EOF. The mbox
+// library also returns io.EOF when it finds no separator where the next
+// message should start, so this is how iterateMbox tells the two apart.
+type eofReader struct {
+	r      io.Reader
+	sawEOF bool
+}
+
+func (e *eofReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		e.sawEOF = true
+	}
+	return n, err
+}
+
+// unreadBytes drains src and returns how much of it the parser never asked
+// for, once ReadMessage has returned io.EOF. A parser that stopped short
+// with less than its own read buffer (4 KiB) left is not seen.
+func unreadBytes(src *eofReader) int64 {
+	if src.sawEOF {
+		return 0
+	}
+	n, _ := io.Copy(io.Discard, src)
+	return n
+}
+
+// openMboxFile returns nil, nil for an empty file: some archives hold a
+// zero-byte mbox, which is nothing to import rather than a reason to stop.
+func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	fh, err := os.Open(mboxfile)
 	if err != nil {
 		log.Printf("Can't os.Open file %s", mboxfile)
 		os.Exit(1)
 	}
-	reader := bufio.NewReaderSize(fh, 1024*1024*1024)
-	mboxReader, err := mbox.CreateMboxStream(reader)
+	if fi, err := fh.Stat(); err == nil && fi.Size() == 0 {
+		log.Printf("openMboxFile: empty file '%s', nothing to import", mboxfile)
+		fh.Close()
+		return nil, nil
+	}
+	src := &eofReader{r: bufio.NewReaderSize(fh, 1024*1024*1024)}
+	mboxReader, err := mbox.CreateMboxStream(src)
 	if err != nil {
 		log.Printf("Can't create mbox reader: %#v", err)
 		os.Exit(1)
 	}
-	return mboxReader
+	return mboxReader, src
 }
 
 func oldGetMessageID(imsgid string) (string, error) {
@@ -1107,10 +1160,12 @@ func oldGetMessageID(imsgid string) (string, error) {
 } // func oldGetMessageID
 
 //func iterateMbox(mboxReader *mbox.MboxStream, srvtp *textproto.Conn) {
-func iterateMbox(mboxReader *mbox.MboxStream, mboxfile string) {
-	var err error
+func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgNumber := 0
 	msgcnt := 0
+	skipped := 0
+	var lastReadErr, prevErr error
+	stoppedEarly := false
 	//msgidmap := make(map[string]int)
 	process := false
 	for {
@@ -1120,14 +1175,25 @@ func iterateMbox(mboxReader *mbox.MboxStream, mboxfile string) {
 
 		message, err := mboxReader.ReadMessage()
 		if err != nil {
-			if err.Error() == "EOF" {
+			if err == io.EOF {
 				log.Printf("[iterateMbox] EOF @ msgNumber=%d mboxfile=%s", msgNumber, mboxfile)
 				break
-			} else {
-				log.Printf("[iterateMbox] ERROR: mboxreader err='%#v' msgNumber=%d", err, msgNumber)
-				continue
 			}
+			// After a malformed message the library skips to the next
+			// separator, so each error costs that one message. Parse
+			// errors carry their line number: the same one twice in a
+			// row means the reader is not advancing.
+			if prevErr != nil && err.Error() == prevErr.Error() {
+				log.Printf("[iterateMbox] ERROR: mboxreader not advancing file='%s' err='%v' msgNumber=%d", mboxfile, err, msgNumber)
+				stoppedEarly = true
+				break
+			}
+			skipped++
+			lastReadErr, prevErr = err, err
+			log.Printf("[iterateMbox] ERROR: mboxreader skipped a message file='%s' err='%v' msgNumber=%d", mboxfile, err, msgNumber)
+			continue
 		}
+		prevErr = nil
 
 		msgNumber++
 		msgcnt++
@@ -1220,18 +1286,22 @@ func iterateMbox(mboxReader *mbox.MboxStream, mboxfile string) {
 	}
 	//globalCounter.setCounter("msgnums", msgNumber)
 	//log.Printf("msgs=%d sent=%d errcnt=%d duplicate=%d rejected=%d", msgNumber, sentcnt, errcnt, nntpdup435, nntp437)
-	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d err=%v", mboxfile, msgNumber, err)
+	if !stoppedEarly {
+		if unread := unreadBytes(src); unread > 0 {
+			log.Printf("[iterateMbox] ERROR: mbox parser stopped early file='%s' msgNumber=%d unread_bytes=%d, not marking done", mboxfile, msgNumber, unread)
+			stoppedEarly = true
+		}
+	}
+	nearMisses, nearMissSamples := mboxReader.NearMisses()
+	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, nearMisses, stoppedEarly, lastReadErr)
+	// near-misses are body lines starting "From " or "#! rnews " that validid
+	// rejected: either ordinary text, or a separator shape validid does not
+	// know, in which case articles were merged. The samples tell which.
+	for _, s := range nearMissSamples {
+		log.Printf("[iterateMbox]   near-miss file='%s' line=%d %q", mboxfile, s.Line, s.Text)
+	}
 
 	//close(worker_channel)
-
-	if err == io.EOF {
-
-		log.Printf("Error reading.")
-
-
-	} else if err != nil {
-		log.Printf("Unable to read next message: %#v\n", err)
-	}
 
 	globalBools.SetGB("feeder_done", true)
 
@@ -1261,7 +1331,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, mboxfile string) {
 	log.Printf("Done sending iterateMbox. %d/%d dup=%d e437=%d err=%d filter=%d", tsentcnt, ttot, tnntpdup435, tnntp437, terrcnt, tnntp999)
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot || tsentcnt+tnntpdup435+tnntp437 == ttot ) && terrcnt == 0 {
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot) && terrcnt == 0 {
-	if terrcnt == 0 {
+	if terrcnt == 0 && !stoppedEarly {
 		globalBools.SetGB("done", true)
 	}
 } // end func iterateMbox

@@ -29,15 +29,15 @@ separator shape `validid` accepts or rejects, which is the missing safety net fo
 measured at ~76× on ordinary body lines with the per-line allocation gone, and guarded by
 a differential test.
 
-**J4 is applied, and running it over the full corpus found the worst bug in this review
-(B6).** No separator is missed anywhere — `validid` is complete for both collections — but
-**112,828 usenet-clari articles (33.7%) are silently never imported**, because a CRLF
-message's blank line is not recognised and the importer's read loop then abandons the rest
-of the file. gna-clari is unaffected. A two-part fix is measured at 2 articles lost instead
-of 112,828, and is not yet applied.
+**J4 is applied, and running it over the full corpus found B6.** No separator is missed
+anywhere — `validid` is complete for both collections — but one malformed message made the
+importer silently drop the rest of its file. On the raw archives that is 112,828
+usenet-clari articles (33.7%), because the parser did not recognise a CRLF blank line. The
+importer's default `dos2unix` pass hides the CRLF part, so a default run lost 1,421, in 2
+files. **B6 is fixed** in both the library and the importer: 2 articles lost in either mode,
+and gna-clari unchanged.
 
-Still open: **B6 (fix measured, not applied), A4, B2–B5, D, E, F, G, rest of H, I3,
-J1–J2, J5–J6**.
+Still open: **A4, B2–B5, D, E, F, G, rest of H, I3, J1–J2, J5–J6**.
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -160,6 +160,19 @@ sentinel file exists (`mbox2nntp.go:386`) and never runs on the directory path.
 `iterateMbox`, and strip a trailing `\r` in `ihave` before writing each header and body
 line, so correctness does not depend on `dos2unix` having run.
 
+**Applied in two parts.** The body half went in with tranche 1 (`iterateMbox` trims
+`"\r\n"`). The header half was missed at first, and showed up when a CRLF article was
+captured on the wire without `dos2unix`: `From: C-ap@clari.net (AP)\r\r\n`. It is now fixed
+in the library: `parseHeaders` trims `"\r\n"` (go-lib-mbox2nntp `f0e5b1c`). Without
+`dos2unix`, that affects 12,064 usenet-clari articles in 281 files, and none in gna-clari.
+`TestCRLFArticleOnTheWire` pins the whole path, parser to IHAVE. The directory path needed
+no change, because `textproto.ReadDotLines` already strips CRLF.
+
+`dos2unix` is now optional for correctness, but it stays the default. `main` checks for
+`/usr/bin/dos2unix` at startup and exits with a clear message before anything is unpacked,
+unless `.nodos2unix` is present. Before, a missing `dos2unix` failed only after the unzip,
+and left the extracted file behind.
+
 ### A4. mboxrd `>From ` escaping is never reversed
 The library documents this explicitly (`go-lib-mbox2nntp/doc.go`): it "will not reverse
 any >From-escaping". `iterateMbox` does not either, so every mboxrd-sourced body line that
@@ -236,18 +249,25 @@ drops its entire subtree. Likewise `/patch` (line 983) matches anywhere in the p
 
 ---
 
-### B6. A third of usenet-clari is never imported: CRLF blank line kills the rest of the file
+### B6. One malformed message silently drops the rest of its file  *(FIXED)*
 
 Found by running the J4 instrumentation over all 2,252 corpus files with the same read loop
 `iterateMbox` uses, then checking the result against a plain line-level count of true
-separators.
+separators. The scan read the archives raw, without the importer's `dos2unix` pass:
 
 ```
 usenet-clari   true articles 334,698   parsed 221,870   LOST 112,828 (33.7%)
 gna-clari      true articles 4,931,412  parsed 4,931,412  lost 0
 ```
 
-All of the loss is in 191 of usenet-clari's 891 files. The other 677 match article for
+**How much a real run lost depends on `dos2unix`.** `proc()` runs `dos2unix -f` on every
+mbox before parsing unless a `.nodos2unix` file exists in the working directory, and that
+turns the CRLF blank lines into plain ones. Re-measured on the 191 affected files after
+`dos2unix -f`, as `proc()` does it: **1,421 of 138,903 lost, all in 2 files** — the two
+messages with no blank line at all, plus everything after each. The 112,828 figure applies
+to runs with `.nodos2unix`, and to any other user of the library.
+
+All of the raw-mode loss is in 191 of usenet-clari's 891 files. The other 677 match article for
 article. Worst cases: `clari.web.xcache.html` 44,247 of 44,291 lost,
 `clari.web.xcache.small` 27,551 of 27,627, `clari.web.xcache.large` 20,898 of 20,972 —
 and real news groups too: `clari.news.gov.international` loses 2,101 of 2,350.
@@ -276,7 +296,7 @@ The CRLF messages are mixed into otherwise-LF files, which is why only some file
 the one inspected byte-by-byte is a Google Groups export with `\r\n` headers. This is the parse-level half of A3 and the
 I2 note on inconsistent CR handling: not just stray bytes on the wire, but lost articles.
 
-**Fix — measured on a scratch copy of the library, not yet applied:**
+**Fix — applied as go-lib-mbox2nntp `28f8574`, variant B.** Measured on the raw archives:
 
 | | parsed | lost | lost % | files stopped early |
 |---|---|---|---|---|
@@ -288,10 +308,42 @@ I2 note on inconsistent CR handling: not just stray bytes on the wire, but lost 
   `"\r\n"`) used in both of `parseHeaders`'s boundary checks and in `parseBlankLine`, and a
   guard so the continuation loop in `parseHeader` stops at a blank line. Recovers 1,776 of
   1,778.
-- **B** adds a `resync()` called from `ReadMessage` when `parseHeaders` fails: advance to the
-  next line `validid` accepts, or to end of input. Then a bad message costs exactly one
+- **B** adds a `resync()` called from `ReadMessage` when `parseHeaders` (or
+  `parseBlankLine`) fails: advance to the next line `validid` accepts, or to end of input.
+  Then a bad message costs exactly one
   article, never the rest of the file. B loses precisely the 2 genuinely malformed messages,
   and no file parses more articles than it has separators, so nothing is over-split.
+- After `dos2unix`, B gives 138,901 of 138,903 on the affected files: the same 2.
+- Tests: `TestCRLFBlankLineEndsHeaders` and `TestResyncAfterMalformedHeaders`, both of
+  which fail on the previous code.
+
+**Importer side** (mbox2nntp, the same commit as the library bump):
+
+- `iterateMbox` stops treating a parser that gives up early as a finished file. The file is
+  read through an `eofReader`. When `ReadMessage` returns `io.EOF` but the source never
+  reached EOF, the importer logs `ERROR: mbox parser stopped early ... unread_bytes=N` and
+  does not set `done`, so `mvmbox` leaves the file in place rather than renaming it
+  `.done`. This catches any future parser bug of this kind, not just this one.
+- If the same error comes back twice in a row (errors carry their line number), the reader
+  is not advancing: the importer stops and treats the file the same way, instead of
+  spinning.
+- Skipped messages are counted, and the `Done read` line now reports `skipped=`,
+  `near-misses=`, `stopped-early=` and `last-err=`. The old `err=` there was a shadowed
+  variable and was always `<nil>`.
+- An empty mbox is logged and marked done instead of reaching `os.Exit(1)`.
+- Tests: `TestUnreadBytesSeesEarlyStop` and `TestOpenMboxFileEmpty`.
+
+End to end, the old and new binaries were run against a fake IHAVE server with
+`.nodos2unix`:
+
+| file | old | new |
+|---|---|---|
+| `clari.web.xcache.html` | 44 parsed, 44 sent | 44,291 parsed, 44,286 sent |
+| `clari.world.mideast.iraq` | 3,752 parsed, 978 sent | 3,901 parsed (1 skipped), 1,127 sent |
+| zero-byte archive | `exit 1` | skipped, moved to `.done`, `exit 0` |
+
+The iraq gap between parsed and sent is not a loss. 2,774 of its messages are bodiless
+`cmsg cancel` control messages, and `iterateMbox` drops those on `body=0`.
 
 Regression check: the fix changes behaviour only where a `"\r\n"` line appears inside a
 header block. Counted across the whole corpus: **gna-clari has zero**, so on that collection
@@ -305,10 +357,15 @@ Also from the same scan: 23 usenet-clari archives are **zero bytes**. No article
 but `CreateMboxStream` fails on them and `openMboxFile` calls `os.Exit(1)`, so one empty
 file aborts the whole import run.
 
-**Already-imported data:** if usenet-clari went through the mbox path with this library,
-those 112,828 articles are missing from the server. They can be re-fed after the fix; INN's
-history rejects the ones already present with 435, so a re-run of only the 191 affected
-files is safe.
+**Already-imported data:** what is missing from the server depends on how usenet-clari was
+run. In a default run (with `dos2unix`) it is the 1,421 articles in
+`clari.world.mideast.iraq` and `clari.world.mideast.palestine`. With `.nodos2unix` it is all
+112,828, across the 191 files. Either way, re-feed with the fixed build. INN's history
+rejects the articles it already has with 435, so a re-run is safe. Note that the affected
+archives were renamed `.done` despite the loss.
+
+Related, not fixed: on the plain `.mbox` path, `dos2unix -f` rewrites the source file in
+place. That modifies the archive itself, not a temporary copy.
 
 ## C. Crashes
 
@@ -402,10 +459,13 @@ three nils. The worker sees `cerr == nil`, breaks out of `loop_CB`, and derefere
   `tmpdir//abs/path/to/foo.mbox`. Use `filepath.Base` before joining, and use
   `filepath.Join`. `gunzip` (line 315) additionally uses
   `strings.Replace(mboxfile, ".gz", "", -1)`, which strips `.gz` anywhere in the path.
-- **`mbox2nntp.go:226`** — `convmv` is a **filename** re-encoder, not a content converter,
-  and the arguments are malformed: `"-f ISO-8859-1"` is passed as a single argv element
-  with a leading space. This step either no-ops or `os.Exit(1)`s. Either drop `convert()`
-  or replace it with an in-process `charmap.ISO8859_1` decode of the mbox content.
+- **`convert()` / `convmv`** *(FIXED — removed)* — `convmv` re-encodes file **names**, never
+  content. Run locally (convmv 2.06) exactly as `convert()` called it, on an mbox with
+  Latin-1 text: checksum unchanged, `converted 0 files`. On a Latin-1 *name* it did rename
+  the file, after which `openMboxFile` opened the old name and hit `os.Exit(1)`. So it was
+  a no-op on the archive.org names at best, and an abort at worst. Content is deliberately
+  not transcoded in its place: articles go out byte for byte and each declares its own
+  charset in `Content-Type`, which a UTF-8 conversion would make false.
 - **`exec.Command("/bin/rm", mboxfile)`** (line 334), `/bin/mv` (line 404), and the
   unzip/gunzip calls pass filenames without a `--` separator. A file named `-rf` or
   `--help` is interpreted as a flag. Add `--`, or replace `rm`/`mv` with `os.Remove` /
@@ -756,9 +816,9 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 6. **J3** — the byte-prefix gate in front of `validid`. Isolated, measured ~76× on the
    hottest loop, and provably cannot change behaviour.  *(DONE)*
 7. **J4** — near-miss instrumentation.  *(DONE — and it found B6)*
-8. **B6** — CRLF blank line + resync. Measured to recover 112,826 of 112,828 lost
-   usenet-clari articles, and a provable no-op on gna-clari. **Do this next**, then re-feed
-   the 191 affected files.
+8. **B6** — CRLF blank line + resync in the library; early-stop detection, the
+   stuck-loop guard and empty-file handling in the importer.  *(DONE — re-feed the
+   affected files; see B6)*
 9. **G, E, J5–J6, A4, B4, B5** — throughput, header handling, regex naming, and the
    optional `>From ` / missing-`Date:` repair work.
 

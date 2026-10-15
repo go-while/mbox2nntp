@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/dlclark/regexp2 v1.12.0
-	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261015073820-114d72104d4a
+	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261015184219-f0e5b1c431b2
 	github.com/go-while/go-utils v0.0.0-20261015041029-1fd38d8cfc2d
 	github.com/go-while/nntp-overview v0.0.0-20250520152009-98ae78251105
 )
