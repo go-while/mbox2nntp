@@ -233,7 +233,7 @@ Only a subsequent *write* failure produces -999 and a reconnect.
 **Fix:** in `ihave`, distinguish: if `err` is not a `*textproto.Error`, return `-999` so the
 article is requeued and the connection rebuilt.
 
-### B4. Articles with no `Date:` header are dropped, and the repair path is dead code
+### B4. Articles with no `Date:` header are dropped, and the repair path is dead code  *(CLOSED — measured, nothing to repair)*
 `mbox2nntp.go:1641-1644` returns 437. The intended repair at `mbox2nntp.go:1635` is
 unreachable: `try_fix_date` is declared `false` at line 1443 and never assigned, and
 `nntp_posting_date` (line 1449) is never populated — nothing ever reads
@@ -243,6 +243,22 @@ unreachable: `try_fix_date` is declared `false` at line 1443 and never assigned,
 **Fix:** actually populate `nntp_posting_date` from `NNTP-Posting-Date`, `X-Original-Date`,
 or the mbox `From ` separator timestamp, and synthesize `From:` when missing (as
 `read_file` already does at line 573).
+
+**Measured, then closed:** across all 5,189,059 articles that reach `rewriteHead`
+(gna-clari, usenet-clari and both akita files), **not one lacks `Date:`**. All 16 rejections
+are a missing Subject: 1 in gna-clari and 15 in the akita gz files. A repair path would have
+nothing to repair, and inventing a date from the separator line (which in gna-clari may be
+the dump time, not the posting time) is worse than a visible 437. So the dead
+`try_fix_date` / `nntp_posting_date` pair is deleted and a missing `Date:` stays a 437.
+The `has_hdr_from` block in `ihave` had already gone with E. Revisit this if a new
+collection logs `!has_hdr_date`.
+
+The count is below the 334,696 messages B6 parses in usenet-clari, because `iterateMbox`
+drops some messages before `rewriteHead`. In usenet-clari that is 86,008 with an empty
+body: 85,736 cancel control messages, which is correct, and 272 articles whose body is
+missing from the archive itself (such as a spam with `Lines: 2` and no body lines).
+Another 326 are yEnc binaries, 1 has no Message-ID, and 23 zip entries are not mboxes.
+None of the 272 lacks `Date:` either.
 
 ### B5. Overly broad directory filter  *(FIXED)*
 `mbox2nntp.go:982` — `strings.Contains(fpl, ")")` rejects a file if **any** component of
@@ -841,7 +857,7 @@ upstream.
   bumped it by one. No separator shape is ≤ 6 bytes so nothing broke, but the constant was
   meaningless — replaced by the prefix gate in J3.
 
-### I3. Still open (present in both, not a regression)
+### I3. Present in both, not a regression  *(FIXED)*
 
 - **`nextLine()` discards the final line of a file that does not end in a newline.** On
   `ReadBytes('\n')` error the returned bytes are thrown away along with the data.
@@ -849,6 +865,16 @@ upstream.
   (64 KiB in `iterateMbox`) comes back as two `Read` calls; `iterateMbox` treats each as a
   separate line and appends `CRLF` to both. Rare, but it hits exactly the long
   base64/uuencoded lines that matter.
+
+**Fixed, as a precaution:** the corpus has neither case. No body line reaches 64 KiB, and
+every one of the 2,261 files ends in a newline. Both fixes are for future collections.
+
+- Library `605980f`: `nextLine` keeps the last line on `io.EOF` and terminates it with
+  `\n`. `TestFinalLineWithoutNewline` covers it. The importer picks this up when its
+  `go.mod` moves to that commit, after the library is pushed.
+- Importer: the body loop is now `readBody`, which joins `Read` pieces until a line ends
+  in `\n`. `TestReadBodyLongLine` uses a 200 KiB line, a line that exactly fills the
+  buffer, and a missing final newline; before the fix the 200 KiB line came back as 4 lines.
 
 ---
 
@@ -973,7 +999,7 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 
 ### J6. The two regexes in `mbox2nntp.go`
 
-- **`regex_isAlphaNumStart` (`mbox2nntp.go:70`) is never used.** Delete it.
+- **RESOLVED — `regex_isAlphaNumStart` (`mbox2nntp.go:70`) is never used.** Deleted with H.
 - **`regex_isbaddateline` (`mbox2nntp.go:71`)** only acts when the *previous* line is a
   continuation (`mbox2nntp.go:1479-1487`). An unfolded `Thu, 1 Jan 1970 00:00:00 +0000`
   following a normal header falls through both branches, reaches the colon split at
@@ -981,6 +1007,15 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
   `header_key = "Thu, 1 Jan 1970 00"` — which INN 437s. Note this interacts with the
   `prevline > 0` off-by-one in **E**: `spaced_prevline` is never true for `i <= 1`. It is
   also a 5-byte test (`^[A-Z][a-z][a-z], `) that does not need a backtracking engine.
+
+  **Resolved:** it is now `isBadDateLine`, a byte test, and `TestIsBadDateLineMatchesRegex`
+  checks it against the old regex on hand-picked and 20,000 random inputs. With this,
+  `mbox2nntp.go` no longer imports `regexp2`. The off-by-one went with E2. The case of an
+  unfolded date line after a normal header was measured rather than guessed: the harness
+  checked every header line `rewriteHead` emits, in all 5,189,043 accepted articles. **None has an
+  invalid field name** (empty, or containing a space or a control byte). So the bogus
+  `Thu, 1 Jan 1970 00:` header does not occur in this corpus, and the branch logic is left
+  as it is.
 
 ---
 

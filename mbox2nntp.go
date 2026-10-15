@@ -26,7 +26,6 @@ import (
 	//"runtime"
 	//"math/rand"
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
-	"github.com/dlclark/regexp2"
 	//"github.com/edsrzf/mmap-go"
 	"github.com/go-while/go-utils"
 	"github.com/go-while/go-lib-mbox2nntp"
@@ -74,7 +73,6 @@ var (
 	globalBools             tsm_GlobalBools.GlobalBools
 	globalCounter           GlobalCounter
 	worker_channel          chan *ArticleItem
-	regex_isbaddateline   = regexp2.MustCompile(`^[A-Z][a-z][a-z],\ `, 0)
 )
 
 // GlobalCounter is safe to use concurrently.
@@ -1166,6 +1164,44 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	return mboxReader, src
 }
 
+// readBody reads a message body into lines without their line endings.
+// isbinary is set, and the body left out, when DROPBINARY is on and a line
+// starts with "=ybegin".
+func readBody(bodyReader io.Reader) (body []string, isbinary bool) {
+	buffer := make([]byte, 64*1024)
+	var part []byte // a line longer than buffer, read so far
+	for {
+		n, err := bodyReader.Read(buffer)
+		if err != nil {
+			if len(part) == 0 {
+				return body, isbinary
+			}
+			n = 0 // the stream ended inside a line: keep what came
+		} else if n == 0 {
+			continue // io.Reader allows an empty read; it is not a line
+		} else if buffer[n-1] != '\n' {
+			// one Read returns at most len(buffer) bytes of a line; each
+			// piece used to become a line of its own
+			part = append(part, buffer[:n]...)
+			continue
+		}
+		line := string(buffer[:n])
+		if len(part) > 0 {
+			line = string(part) + line
+			part = part[:0]
+		}
+		if DROPBINARY && !isbinary && strings.HasPrefix(line, "=ybegin") {
+			isbinary = true
+		}
+		// strip CR as well: ihave appends CRLF, so a surviving CR
+		// goes out as "\r\r\n" on any mbox dos2unix did not touch.
+		line = strings.TrimRight(line, "\r\n")
+		if !isbinary {
+			body = append(body, line)
+		}
+	}
+}
+
 //func iterateMbox(mboxReader *mbox.MboxStream, srvtp *textproto.Conn) {
 func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgNumber := 0
@@ -1177,7 +1213,6 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	for {
 		//var message *Message
 		//lines := make([]string, 0)
-		var body []string
 
 		message, err := mboxReader.ReadMessage()
 		if err != nil {
@@ -1222,36 +1257,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			log.Printf("[iterateMbox] mbox %s msgid not found msgnum=%d \n map='%v' \n ko='%v' \n err='%v'", mboxfile, msgNumber, headermap, keysorder, err)
 		}
 
-		//log.Printf("bodyreader")
-		isbinary := false
-		bodyReader := message.BodyReader()
-		buffer := make([]byte, 64*1024)
-		n := 0
-
-		for {
-			//log.Printf("msgnum=%d bodyreader len_lines=%d", msgNumber, len(lines))
-			n, err = bodyReader.Read(buffer)
-			if err != nil {
-				//log.Printf("bodyReader err='%v' n=%d", err, n)
-				break
-			}
-			/*
-			if len(line) >= cap(buffer) {
-				buffer = make([]byte, len(line))
-			}
-			*/
-			line := string(buffer[0:n])
-			if DROPBINARY && !isbinary && strings.HasPrefix(line, "=ybegin") {
-				isbinary = true
-				//break
-			}
-			// strip CR as well: ihave appends CRLF, so a surviving CR
-			// goes out as "\r\r\n" on any mbox dos2unix did not touch.
-			line = strings.TrimRight(line, "\r\n")
-			if !isbinary {
-				body = append(body, line)
-			}
-		}
+		body, isbinary := readBody(message.BodyReader())
 
 		if msgid != "" { err = nil }
 
@@ -1638,6 +1644,17 @@ func cleanHeadline(line string) string {
 	return line
 }
 
+// isBadDateLine reports whether line starts like a date ("Thu, "), which
+// some Google-made headers carry as a line of its own. It was the regex
+// ^[A-Z][a-z][a-z],\  on a backtracking engine.
+func isBadDateLine(line string) bool {
+	return len(line) >= 5 &&
+		line[0] >= 'A' && line[0] <= 'Z' &&
+		line[1] >= 'a' && line[1] <= 'z' &&
+		line[2] >= 'a' && line[2] <= 'z' &&
+		line[3] == ',' && line[4] == ' '
+}
+
 // rewriteHead turns a parsed article's header lines into the ones IHAVE
 // sends: Path gets our prefix, Xref/Expires/"From " lines and their
 // continuations are dropped, Message-ID is reduced to the one being fed,
@@ -1645,13 +1662,11 @@ func cleanHeadline(line string) string {
 func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bool, code int) {
 	has_hdr_date := false
 
-	try_fix_date := false
 	ignore_nextline := false
 	has_subj := false
 	has_msgid := false
 
 	var messageids []string
-	nntp_posting_date := ""
 
 	for i, line := range head {
 		line = cleanHeadline(line)
@@ -1680,14 +1695,14 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 		}
 
 		// header starting with line "Thu, ... datestring" some google-headers are that broken, we ignore the line
-		if isMatch, _ := regex_isbaddateline.MatchString(line); isMatch {
+		if isBadDateLine(line) {
 			if spaced_prevline && !spaced_nextline {
-				log.Printf("regex_isbaddateline: ignore headline=%d msgid='%s'", i, msgid)
+				log.Printf("isBadDateLine: ignore headline=%d msgid='%s'", i, msgid)
 				continue
 			} else
 			if spaced_prevline && spaced_nextline {
 				// add a space
-				log.Printf("regex_isbaddateline: headline=%d add space msgid='%s'", i, msgid)
+				log.Printf("isBadDateLine: headline=%d add space msgid='%s'", i, msgid)
 				line = " "+line
 			}
 		}
@@ -1830,12 +1845,9 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 	}
 
 
-	if try_fix_date && nntp_posting_date != "" {
-		newhead = append(newhead, "Date: "+nntp_posting_date)
-		has_hdr_date = true
-	}
-
-
+	// No Date: is a 437 (B4). A repair from NNTP-Posting-Date or the
+	// separator was planned, never wired up, and would have nothing to
+	// do: no article in the 5.2M-article corpus lacks Date:.
 	if !has_hdr_date {
 		log.Printf("Error msgid='%s' !has_hdr_date", msgid)
 		return nil, false, 437

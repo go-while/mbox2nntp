@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
 
@@ -858,5 +859,69 @@ func TestReadFileHonoursDropBinary(t *testing.T) {
 	DROPBINARY = false
 	if msgid := read_file(fp); msgid != "<ybegin@test>" || len(worker_channel) != 1 {
 		t.Fatalf("noDROPBINARY: read_file = %q, queued %d; want sent", msgid, len(worker_channel))
+	}
+}
+
+// chunkReader hands out its data at most max bytes per Read, a line at a
+// time, the way the library's bodyReader does.
+type chunkReader struct {
+	lines []string
+	where int
+}
+
+func (c *chunkReader) Read(p []byte) (int, error) {
+	if len(c.lines) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, c.lines[0][c.where:])
+	c.where += n
+	if c.where == len(c.lines[0]) {
+		c.lines, c.where = c.lines[1:], 0
+	}
+	return n, nil
+}
+
+// I3: a body line longer than readBody's 64 KiB buffer comes back over
+// several Reads; each piece used to become a line of its own, with CRLF
+// inserted between them on the wire.
+func TestReadBodyLongLine(t *testing.T) {
+	long := strings.Repeat("x", 200*1024)
+	exact := strings.Repeat("y", 64*1024-1) // with its "\n", fills the buffer exactly
+	body, isbinary := readBody(&chunkReader{lines: []string{
+		"short\n", long + "\r\n", exact + "\n", "", "no newline at the end",
+	}})
+	want := []string{"short", long, exact, "no newline at the end"}
+	if isbinary || len(body) != len(want) {
+		t.Fatalf("got %d lines (isbinary=%t), want %d", len(body), isbinary, len(want))
+	}
+	for i := range want {
+		if body[i] != want[i] {
+			t.Errorf("line %d: got %d bytes, want %d", i, len(body[i]), len(want[i]))
+		}
+	}
+}
+
+// isBadDateLine replaced a regexp2 pattern; it must give the same verdict.
+func TestIsBadDateLineMatchesRegex(t *testing.T) {
+	re := regexp2.MustCompile(`^[A-Z][a-z][a-z],\ `, 0)
+	lines := []string{"", "Thu, 1 Jan 1970 00:00:00 +0000", "Thu,", "Thu, ", "thu, 1", "THu, 1",
+		"Thu,1", "Th\u00fc, 1", " Thu, 1", "Date: Thu, 1 Jan 1970", "Mon, ", "Zzz, x", "Aaa,  "}
+	r := rand.New(rand.NewSource(1))
+	alphabet := []byte("AZaz@[`{, \t\xc3")
+	for i := 0; i < 20000; i++ {
+		b := make([]byte, r.Intn(7))
+		for j := range b {
+			b[j] = alphabet[r.Intn(len(alphabet))]
+		}
+		lines = append(lines, string(b))
+	}
+	for _, l := range lines {
+		want, err := re.MatchString(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := isBadDateLine(l); got != want {
+			t.Errorf("isBadDateLine(%q) = %v, regex says %v", l, got, want)
+		}
 	}
 }
