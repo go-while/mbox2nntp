@@ -29,7 +29,15 @@ separator shape `validid` accepts or rejects, which is the missing safety net fo
 measured at ~76× on ordinary body lines with the per-line allocation gone, and guarded by
 a differential test.
 
-Still open: **A4, B2–B5, D, E, F, G, rest of H, I3, J1–J2 and J4–J6**.
+**J4 is applied, and running it over the full corpus found the worst bug in this review
+(B6).** No separator is missed anywhere — `validid` is complete for both collections — but
+**112,828 usenet-clari articles (33.7%) are silently never imported**, because a CRLF
+message's blank line is not recognised and the importer's read loop then abandons the rest
+of the file. gna-clari is unaffected. A two-part fix is measured at 2 articles lost instead
+of 112,828, and is not yet applied.
+
+Still open: **B6 (fix measured, not applied), A4, B2–B5, D, E, F, G, rest of H, I3,
+J1–J2, J5–J6**.
 
 Findings were verified three ways, not just read off the source: against the real corpus in
 `/tank0/tmp/pad/mbox2nntp` (11 GB, 3 621 files, two archive.org ClariNet collections), by
@@ -227,6 +235,80 @@ drops its entire subtree. Likewise `/patch` (line 983) matches anywhere in the p
 **Fix:** apply these tests to `filepath.Base(fp)`, not the full path.
 
 ---
+
+### B6. A third of usenet-clari is never imported: CRLF blank line kills the rest of the file
+
+Found by running the J4 instrumentation over all 2,252 corpus files with the same read loop
+`iterateMbox` uses, then checking the result against a plain line-level count of true
+separators.
+
+```
+usenet-clari   true articles 334,698   parsed 221,870   LOST 112,828 (33.7%)
+gna-clari      true articles 4,931,412  parsed 4,931,412  lost 0
+```
+
+All of the loss is in 191 of usenet-clari's 891 files. The other 677 match article for
+article. Worst cases: `clari.web.xcache.html` 44,247 of 44,291 lost,
+`clari.web.xcache.small` 27,551 of 27,627, `clari.web.xcache.large` 20,898 of 20,972 —
+and real news groups too: `clari.news.gov.international` loses 2,101 of 2,350.
+
+**Mechanism — two bugs that compound.**
+
+1. *Library:* the header/body boundary is only recognised as a line that is exactly `"\n"`
+   (`parseHeaders`, `m.prefetch[0] == '\n'`). A CRLF message's blank line is `"\r\n"`.
+   Because `isspace` is `b < 33`, that `\r` instead passes as a header *continuation line*,
+   and the body is then read as headers until a line with no colon turns up, which fails
+   with `Colon not found in expected 'key: value' syntax`. In the 19 cases where body lines
+   happen to contain a colon (`NIV Bible:`, `Romans 3:10`, URLs), they are filed as headers
+   first.
+2. *Importer:* `iterateMbox` treats any non-EOF error from `ReadMessage` as skippable and
+   `continue`s. But the stream is still positioned on the line that broke. The next
+   `ReadMessage` runs `parseFrom` on it, that is not a separator, it returns `io.EOF`, and
+   `iterateMbox` takes that as end of file. **One bad message silently discards every
+   message after it in the file.** The log shows a normal `EOF @ msgNumber=N`.
+
+Reproduced on a four-message mbox: a malformed header in message 2 loses messages 2, 3 and 4.
+
+Classified across the corpus, by a line-level mirror of the parser's rules which flags
+exactly the same 191 files: **1,778 malformed header blocks, 1,776 of them CRLF blank lines**,
+2 genuinely with no blank line (`clari.world.mideast.iraq`, `clari.world.mideast.palestine`).
+The CRLF messages are mixed into otherwise-LF files, which is why only some files are hit;
+the one inspected byte-by-byte is a Google Groups export with `\r\n` headers. This is the parse-level half of A3 and the
+I2 note on inconsistent CR handling: not just stray bytes on the wire, but lost articles.
+
+**Fix — measured on a scratch copy of the library, not yet applied:**
+
+| | parsed | lost | lost % | files stopped early |
+|---|---|---|---|---|
+| current | 221,870 | 112,828 | 33.71% | 174 |
+| A: accept `"\r\n"` as the blank line | 333,277 | 1,421 | 0.42% | 2 |
+| **B: A + resync to the next separator after a header error** | **334,696** | **2** | **0.00%** | **0** |
+
+- **A** is three one-line changes in `mbox.go`: an `isBlankLine` helper (`"\n"` or
+  `"\r\n"`) used in both of `parseHeaders`'s boundary checks and in `parseBlankLine`, and a
+  guard so the continuation loop in `parseHeader` stops at a blank line. Recovers 1,776 of
+  1,778.
+- **B** adds a `resync()` called from `ReadMessage` when `parseHeaders` fails: advance to the
+  next line `validid` accepts, or to end of input. Then a bad message costs exactly one
+  article, never the rest of the file. B loses precisely the 2 genuinely malformed messages,
+  and no file parses more articles than it has separators, so nothing is over-split.
+
+Regression check: the fix changes behaviour only where a `"\r\n"` line appears inside a
+header block. Counted across the whole corpus: **gna-clari has zero**, so on that collection
+it is provably a no-op. In usenet-clari there are 19, in 11 files, and the
+line after each one is body text (`NIV Bible:`, `Romans 3:10`, URLs, a quoted
+`El lunes, 26 de octubre de 2009 13:37:09 ...`), which today is filed as headers and the
+fix correctly moves to the body — anything after the blank line is body, per RFC 5322. Near-miss samples after
+the fix are still all prose, so recovering those bodies uncovers no hidden separator either.
+
+Also from the same scan: 23 usenet-clari archives are **zero bytes**. No articles are lost,
+but `CreateMboxStream` fails on them and `openMboxFile` calls `os.Exit(1)`, so one empty
+file aborts the whole import run.
+
+**Already-imported data:** if usenet-clari went through the mbox path with this library,
+those 112,828 articles are missing from the server. They can be re-fed after the fix; INN's
+history rejects the ones already present with 435, so a re-run of only the 191 affected
+files is safe.
 
 ## C. Crashes
 
@@ -614,11 +696,20 @@ in the corpus plus every truncation of every accepted shape), and
 
 This is the hottest loop in the importer — it runs once per body line across every TB.
 
-### J4. Instrument the near-misses
+### J4. Instrument the near-misses  *(FIXED)*
 
-Add a counter for lines that start with `From ` but fail `validid`, and log a sample. That
-turns "which branches do we still need" into a number you read off each run, instead of
-guessing. Point it at one file per new archive.org collection before importing it.
+`MboxStream.NearMisses()` in `go-lib-mbox2nntp` (`c09fa7f`) returns the count of body lines
+that pass the `couldBeSep` gate but fail `validid`, plus the first five with line numbers.
+`iterateMbox` reports the count on its per-file `Done read` line and logs the samples when
+it is non-zero. Point it at one file per new archive.org collection before importing it.
+
+Run over the whole corpus: **468 near-misses in 155 files, all in usenet-clari, and all 382
+samples are prose** (`From Table 1 ...`, `From my point of view ...`,
+`From 1995 I had some Polish friends ...`). None is separator-shaped, so `validid` misses
+nothing in either collection — J2's conclusion now holds on all 2,252 files, not 60.
+After the B6 fix recovers the lost bodies it is 614 near-misses, still all prose.
+
+The same run is what found B6.
 
 ### J5. Split the alternation into named patterns
 
@@ -664,8 +755,12 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
    *(DONE)*
 6. **J3** — the byte-prefix gate in front of `validid`. Isolated, measured ~76× on the
    hottest loop, and provably cannot change behaviour.  *(DONE)*
-7. **G, E, J4–J6, A4, B4, B5** — throughput, header handling, regex instrumentation and
-   naming, and the optional `>From ` / missing-`Date:` repair work.
+7. **J4** — near-miss instrumentation.  *(DONE — and it found B6)*
+8. **B6** — CRLF blank line + resync. Measured to recover 112,826 of 112,828 lost
+   usenet-clari articles, and a provable no-op on gna-clari. **Do this next**, then re-feed
+   the 191 affected files.
+9. **G, E, J5–J6, A4, B4, B5** — throughput, header handling, regex naming, and the
+   optional `>From ` / missing-`Date:` repair work.
 
 ## Verification
 
