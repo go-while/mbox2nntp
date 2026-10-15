@@ -728,7 +728,8 @@ against a real INN.
   **Correction to an earlier draft:** that draft also predicted a `copylocks` warning at
   `mbox2nntp.go:663-664`. Vet does *not* flag it — assigning a fresh composite literal
   whose `sync.Mutex` is at its zero value is not a lock copy. The code is fine as written.
-- `gofmt -l` flags the file. Run `gofmt -w`.
+- **RESOLVED — `gofmt -l` flags the file.** `gofmt -w` was run on `mbox2nntp.go` and
+  `tsm/GlobalBools/GlobalBools.go` as a commit of its own, with no other change in it.
 - **RESOLVED (kept positional) — argument parsing**: `mbox2nntp.go:707` uses `if len(os.Args) == 7` for `PREFIX` while
   the next block uses `>= 8`, so `PREFIX` is never set when 8 arguments are supplied. `PREFIX`
   is also never read anywhere. The usage string (line 725) omits arguments 6 and 7. Replace
