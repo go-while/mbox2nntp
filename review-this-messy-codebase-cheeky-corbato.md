@@ -244,12 +244,19 @@ unreachable: `try_fix_date` is declared `false` at line 1443 and never assigned,
 or the mbox `From ` separator timestamp, and synthesize `From:` when missing (as
 `read_file` already does at line 573).
 
-### B5. Overly broad directory filter
+### B5. Overly broad directory filter  *(FIXED)*
 `mbox2nntp.go:982` — `strings.Contains(fpl, ")")` rejects a file if **any** component of
 its path contains `)`. A single parent directory named e.g. `alt.foo (part 2)` silently
 drops its entire subtree. Likewise `/patch` (line 983) matches anywhere in the path.
 
 **Fix:** apply these tests to `filepath.Base(fp)`, not the full path.
+
+**Done:** the filter is now `skipDirFile(fp)` and tests only the lower-cased base name.
+`/patch` became "name starts with `patch`" (`patch01`, `Patch02`), and `/index` became
+"name is `index`". Every suffix test gives the same answer on the base name as on the
+path, since none contains a `/`. `TestSkipDirFile` covers a `)` directory and a `patch`
+directory, which used to drop their whole subtree, and fails if the test goes back to the
+full path.
 
 ---
 

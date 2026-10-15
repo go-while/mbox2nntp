@@ -1118,31 +1118,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		t, totf, badfiles := 0, 0, 0
 		werr := walkFiles(mboxfile, func(fp string) {
 			totf++
-			badfile := false
-			fpl := strings.ToLower(fp)
-			if strings.Contains(fpl, ")") { badfile = true }
-			if strings.Contains(fpl, "/patch") { badfile = true }
-			if strings.HasSuffix(fpl, "/index") { badfile = true }
-			if strings.HasSuffix(fpl, ".#index") { badfile = true }
-			if strings.HasSuffix(fpl, ".c") { badfile = true }
-			if strings.HasSuffix(fpl, ".tbl") { badfile = true }
-			if strings.HasSuffix(fpl, ".bat") { badfile = true }
-			if strings.HasSuffix(fpl, ".com") { badfile = true }
-			if strings.HasSuffix(fpl, ".exe") { badfile = true }
-			if strings.HasSuffix(fpl, ".html") { badfile = true }
-			if strings.HasSuffix(fpl, ".htm") { badfile = true }
-			if strings.HasSuffix(fpl, ".7z") { badfile = true }
-			if strings.HasSuffix(fpl, ".zip") { badfile = true }
-			if strings.HasSuffix(fpl, ".gz") { badfile = true }
-			if strings.HasSuffix(fpl, ".xz") { badfile = true }
-			if strings.HasSuffix(fpl, ".z") { badfile = true }
-			if strings.HasSuffix(fpl, ".tgz") { badfile = true }
-			if strings.HasSuffix(fpl, ".bak") { badfile = true }
-			if strings.HasSuffix(fpl, ".brk") { badfile = true }
-			if strings.HasSuffix(fpl, ".overview") { badfile = true }
-			if strings.HasSuffix(fpl, ".xover") { badfile = true }
-			if strings.HasSuffix(fpl, ".msgids") { badfile = true }
-			if badfile {
+			if skipDirFile(fp) {
 				badfiles++
 				return
 			}
@@ -1188,6 +1164,30 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	}
 	iterateMbox(reader,src,mboxfile)
 	return mboxfile
+}
+
+// skipDirFile reports whether the directory walk should skip fp: index
+// and overview files, archives, sources and binaries, patches, and names
+// with ")". Only the file's own name is tested. The old test ran on the
+// whole path, so one parent directory with ")" or "/patch" in its name
+// dropped its entire subtree (B5).
+func skipDirFile(fp string) bool {
+	name := strings.ToLower(filepath.Base(fp))
+	if strings.Contains(name, ")") || strings.HasPrefix(name, "patch") || name == "index" {
+		return true
+	}
+	for _, ext := range skipDirExts {
+		if strings.HasSuffix(name, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+var skipDirExts = []string{
+	".#index", ".c", ".tbl", ".bat", ".com", ".exe", ".html", ".htm",
+	".7z", ".zip", ".gz", ".xz", ".z", ".tgz", ".bak", ".brk",
+	".overview", ".xover", ".msgids",
 }
 
 func dirExists(dir string) bool {

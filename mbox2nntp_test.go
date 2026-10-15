@@ -803,3 +803,29 @@ func TestRewriteHead(t *testing.T) {
 		}
 	}
 }
+
+func TestSkipDirFile(t *testing.T) {
+	for fp, want := range map[string]bool{
+		// B5: a parent directory's name must not decide for its files
+		"spool/alt.foo (part 2)/123":     false,
+		"spool/comp.sources.patches/123": false,
+		"spool/patch/123":                false,
+		// the file's own name still does
+		"spool/alt.foo/123 (copy)":   true,
+		"spool/comp.sources/patch01": true,
+		"spool/comp.sources/Patch02": true,
+		"spool/alt.foo/index":        true,
+		"spool/alt.foo/INDEX":        true,
+		"spool/alt.foo/.#index":      true,
+		"spool/alt.foo/x.overview":   true,
+		"spool/alt.foo/x.tar.Z":      true,
+		"spool/alt.foo/main.c":       true,
+		"spool/alt.foo/123":          false,
+		"spool/alt.foo/reindex":      false,
+		"spool/alt.foo/index.txt":    false,
+	} {
+		if got := skipDirFile(fp); got != want {
+			t.Errorf("skipDirFile(%q) = %v, want %v", fp, got, want)
+		}
+	}
+}
