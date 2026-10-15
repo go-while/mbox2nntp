@@ -233,7 +233,8 @@ func convert(mboxfile string) {
 
 func fileExists(filename string) bool {
 	info, err := os.Stat(filename)
-	if os.IsNotExist(err) {
+	if err != nil {
+		// not only ENOENT: EACCES/ENOTDIR/ELOOP/ENAMETOOLONG also leave info==nil
 		return false
 	}
 	return !info.IsDir()
@@ -447,10 +448,10 @@ func read_file(file_path string) string {
 
 	//log.Printf(" -> read %d bytes fp='%s'", len(lines), filepath)
 
-	if lines[len(lines)-1] != '.' {
-		lines = append(lines, '\r')
-		lines = append(lines, '\n')
-		lines = append(lines, '.')
+	// the terminator is a line containing only '.', so testing the last byte
+	// drops every article whose final line merely ends in a period.
+	if !bytes.HasSuffix(lines, []byte("\n.")) && !bytes.Equal(lines, []byte(".")) {
+		lines = append(lines, "\r\n."...)
 		//log.Printf(" -> append '.' = %d bytes", len(lines))
 	}
 
@@ -492,12 +493,13 @@ func read_file(file_path string) string {
 			//log.Printf("break reading head")
 			//header = append(header, line)
 			read_head = false
+			continue // the blank separator belongs to neither head nor body
 		}
 		if read_head {
 
 			line = overview.Clean_Headline("?", line, false)
 			if !has_hdr_msgid && line == "Message-ID:" {
-				if strings.HasPrefix(msglines[i+1], " <") {
+				if i+1 < len(msglines) && strings.HasPrefix(msglines[i+1], " <") {
 					line = "Message-ID: " + msglines[i+1]
 					continue_nextline = true
 				}
@@ -682,7 +684,7 @@ func main() {
 		if len(os.Args) >= 4 {
 			MaxWorkers, err = strconv.Atoi(os.Args[3])
 			if err != nil {
-				log.Printf("ERROR: get MaxWorkers failed", err)
+				log.Printf("ERROR: get MaxWorkers failed err='%v'", err)
 				os.Exit(1)
 			}
 		}
@@ -825,7 +827,7 @@ func main() {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)
 			if utils.FileExists(tmpdir+"/"+mboxfile) {
-				log.Printf("cleanup: rm '"+tmpdir+"/"+mboxfile+"'")
+				log.Printf("cleanup: rm '%s/%s'", tmpdir, mboxfile)
 				rmmbox(tmpdir+"/"+mboxfile)
 			}
 		}
@@ -1040,7 +1042,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 
 func dirExists(dir string) bool {
 	info, err := os.Stat(dir)
-	if os.IsNotExist(err) {
+	if err != nil {
 		return false
 	}
 	return info.IsDir()
@@ -1171,9 +1173,9 @@ func iterateMbox(mboxReader *mbox.MboxStream, mboxfile string) {
 				isbinary = true
 				//break
 			}
-			if len(line) >= 1 && line[len(line)-1] == '\n' {
-				line = line[0:len(line)-1]
-			}
+			// strip CR as well: ihave appends CRLF, so a surviving CR
+			// goes out as "\r\r\n" on any mbox dos2unix did not touch.
+			line = strings.TrimRight(line, "\r\n")
 			if !isbinary {
 				body = append(body, line)
 			}
@@ -1421,7 +1423,7 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 	*/
 	test_DRY_RUN := false
 	if test_DRY_RUN {
-		log.Printf("#### ihave --> msgid='%s'")
+		log.Printf("#### ihave --> msgid='%s'", msgid)
 		for i, line := range head {
 			fmt.Println("h=",i, "=", line)
 		}
@@ -1712,13 +1714,11 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		_, err = io.WriteString(CliWriter, CRLF)
 
 		for _, bline := range bodylines {
-			if len(bline) == 1 && bline == DOT {
-				// dot-stuff single dot
-				bline = ".."
-			} else
-			if len(bline) >= 2 && bline[0] == '.' && bline[1] != '.' {
-				// dot-stuff any dot at beginning
-				bline = "."+bline
+			// RFC 3977 3.1.1: ANY line starting with '.' gets one prepended.
+			// The old code skipped lines starting with ".." so they arrived
+			// one dot short.
+			if strings.HasPrefix(bline, DOT) {
+				bline = DOT + bline
 			}
 
 			/*
