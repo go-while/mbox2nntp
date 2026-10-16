@@ -26,3 +26,4 @@ go.work
 
 # Local corpus and working files (hundreds of MB, never belongs in the repo)
 /data/
+/scripts
