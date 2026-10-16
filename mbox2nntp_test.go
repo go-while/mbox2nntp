@@ -281,27 +281,23 @@ func TestEOFReaderCloseReleasesFile(t *testing.T) {
 	}
 }
 
-func TestCheckExecutable(t *testing.T) {
-	dir := t.TempDir()
-	exe := filepath.Join(dir, "exe")
-	plain := filepath.Join(dir, "plain")
-	if err := os.WriteFile(exe, []byte("#!/bin/sh\n"), 0755); err != nil {
+// dos2unix only runs when -dos2unix names a program. By default the input,
+// a plain .mbox included, is read as it is and never rewritten.
+func TestDos2unixOffByDefault(t *testing.T) {
+	defer func(d string, n bool) { DOS2UNIX, NODOS2UNIX = d, n }(DOS2UNIX, NODOS2UNIX)
+	DOS2UNIX, NODOS2UNIX = defaultOptions().dos2unix, false
+	path := filepath.Join(t.TempDir(), "crlf.mbox")
+	data := "From nobody Thu Dec  8 12:55:04 2016\r\nSubject: s\r\n\r\nbody\r\n"
+	if err := os.WriteFile(path, []byte(data), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(plain, nil, 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := checkExecutable(exe); err != nil {
-		t.Errorf("executable file: %v", err)
-	}
-	for _, p := range []string{plain, dir, filepath.Join(dir, "missing")} {
-		if checkExecutable(p) == nil {
-			t.Errorf("checkExecutable(%s) = nil, want an error", p)
-		}
+	dos2unix(path)
+	if got, _ := os.ReadFile(path); string(got) != data {
+		t.Errorf("input changed without -dos2unix: %q", got)
 	}
 }
 
-// A CRLF article read straight from an mbox, as on a .nodos2unix run, must
+// A CRLF article read straight from an mbox, as on any run without -dos2unix, must
 // go out with plain CRLF line endings: no "\r\r\n" in the header or body.
 func TestCRLFArticleOnTheWire(t *testing.T) {
 	globalBools.V = make(map[string]bool)

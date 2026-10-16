@@ -70,7 +70,7 @@ var (
 	MAX_TRIES      = 10
 	retryDelay     = time.Second // backoff unit between tries
 	DRYRUN         bool
-	NODOS2UNIX     bool // skip dos2unix: -no-dos2unix, or a .nodos2unix file in the working directory
+	NODOS2UNIX     bool // skip -dos2unix: -no-dos2unix, or a .nodos2unix file in the working directory
 	globalBools    tsm_GlobalBools.GlobalBools
 	globalCounter  GlobalCounter
 	worker_channel chan *ArticleItem
@@ -550,23 +550,14 @@ func mboxhasZ(mboxfile string) bool {
 	return false
 } // end func mboxhasZ
 
-// DOS2UNIX is run on every mbox before parsing, unless NODOS2UNIX.
-var DOS2UNIX = "/usr/bin/dos2unix"
-
-// checkExecutable returns why path cannot be run, or nil.
-func checkExecutable(path string) error {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return err
-	}
-	if fi.IsDir() || fi.Mode()&0111 == 0 {
-		return fmt.Errorf("%s is not an executable file", path)
-	}
-	return nil
-}
+// DOS2UNIX, when set with -dos2unix, is run on every mbox before parsing,
+// unless NODOS2UNIX. It used to be /usr/bin/dos2unix and always run; the
+// parser handles CRLF itself, and on the whole archive.org corpus every
+// article comes out byte-identical without it.
+var DOS2UNIX = ""
 
 func dos2unix(mboxfile string) {
-	if NODOS2UNIX {
+	if DOS2UNIX == "" || NODOS2UNIX {
 		return
 	}
 	log.Printf("proc dos2unix %s", mboxfile)
@@ -836,8 +827,8 @@ func main() {
 		log.Printf("ERROR: input not found '%s'", mboxfile)
 		os.Exit(1)
 	}
-	log.Printf("server=%s DRYRUN=%t DROPBINARY=%t nodos2unix=%t prehash=%t laxmid=%t timeout=%v max-tries=%d",
-		nntpserv, DRYRUN, DROPBINARY, NODOS2UNIX, PREHASH_MODE, LAXMID, NNTP_TIMEOUT, MAX_TRIES)
+	log.Printf("server=%s DRYRUN=%t DROPBINARY=%t dos2unix=%q nodos2unix=%t prehash=%t laxmid=%t timeout=%v max-tries=%d",
+		nntpserv, DRYRUN, DROPBINARY, DOS2UNIX, NODOS2UNIX, PREHASH_MODE, LAXMID, NNTP_TIMEOUT, MAX_TRIES)
 	log.Printf("MaxWorkers=%d", MaxWorkers)
 	log.Printf("TMPDIR=%s", tmpdir)
 
@@ -884,13 +875,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	// dos2unix runs on every mbox (not on a directory). Check for it now,
+	// -dos2unix runs on every mbox (not on a directory). Look it up now,
 	// before anything is unpacked, instead of failing after the unzip.
-	if !is_dir && !NODOS2UNIX {
-		if err := checkExecutable(DOS2UNIX); err != nil {
-			log.Printf("ERROR: dos2unix is required: %v (install it, point -dos2unix at it, or pass -no-dos2unix)", err)
+	// LookPath also finds dos2unix.exe on Windows.
+	if !is_dir && DOS2UNIX != "" && !NODOS2UNIX {
+		path, err := exec.LookPath(DOS2UNIX)
+		if err != nil {
+			log.Printf("ERROR: -dos2unix: %v", err)
 			os.Exit(1)
 		}
+		DOS2UNIX = path
+	} else if NODOS2UNIX && DOS2UNIX == "" {
+		log.Printf("NOTE: -no-dos2unix and .nodos2unix are no longer needed: dos2unix only runs with -dos2unix")
 	}
 
 	log.Printf("process mboxfile='%s' group='%s'", mboxfile, group)

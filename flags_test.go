@@ -37,7 +37,7 @@ func TestParseArgsDefaults(t *testing.T) {
 	}
 	// the defaults are what the importer did before there were flags
 	if !o.prehash || !o.laxMsgid || o.keepBinary || o.workers != 1 || o.tmpdir != "." ||
-		o.timeout != 2*time.Minute || o.maxTries != 10 || o.dos2unix != "/usr/bin/dos2unix" {
+		o.timeout != 2*time.Minute || o.maxTries != 10 || o.dos2unix != "" {
 		t.Errorf("defaults changed: %+v", *o)
 	}
 }

@@ -48,7 +48,6 @@ func defaultOptions() *options {
 	return &options{
 		workers:  1,
 		tmpdir:   ".",
-		dos2unix: "/usr/bin/dos2unix",
 		timeout:  2 * time.Minute,
 		maxTries: 10,
 		prehash:  true,
@@ -72,8 +71,8 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.StringVar(&o.tmpdir, "tmpdir", o.tmpdir, "`DIR` to unpack .gz, .zip and .7z archives into")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "parse and rewrite articles, but send nothing")
 	fs.BoolVar(&o.keepBinary, "keep-binary", false, "send yEnc (=ybegin) articles instead of dropping them")
-	fs.BoolVar(&o.noDos2unix, "no-dos2unix", false, "do not run dos2unix on the mbox first (same as a .nodos2unix file in the working directory)")
-	fs.StringVar(&o.dos2unix, "dos2unix", o.dos2unix, "`PATH` of the dos2unix binary")
+	fs.BoolVar(&o.noDos2unix, "no-dos2unix", false, "do not run -dos2unix (same as a .nodos2unix file in the working directory); kept for old scripts")
+	fs.StringVar(&o.dos2unix, "dos2unix", o.dos2unix, "run the dos2unix at `PATH` on each mbox first, rewriting a plain .mbox in place; off by default, not needed")
 	fs.DurationVar(&o.timeout, "timeout", o.timeout, "limit on each read or write on a server connection")
 	fs.IntVar(&o.maxTries, "max-tries", o.maxTries, "tries per article after 436 or a lost connection, then it counts as an error")
 	fs.BoolVar(&o.prehash, "prehash", o.prehash, "send \"IHAVE <msgid> <sha256>\"; -prehash=false sends plain \"IHAVE <msgid>\"")
