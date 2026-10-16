@@ -4,6 +4,7 @@ import (
 	//"config"
 	"crypto/sha256"
 	//"encoding/binary"
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -28,6 +29,7 @@ import (
 	//"math/rand"
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	//"github.com/edsrzf/mmap-go"
+	"github.com/bodgit/sevenzip"
 	"github.com/go-while/go-lib-mbox2nntp"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
 	//"nntp/data/overview"
@@ -409,42 +411,22 @@ func extractedPath(archive, ext string) string {
 	return filepath.Join(tmpdir, strings.TrimSuffix(filepath.Base(archive), ext))
 }
 
-// unzip and unzip7 overwrite: a file left by an interrupted run may be
+// unpack runs fn to extract archive to dst, and exits on failure. The
+// extractors overwrite dst: a file left by an interrupted run may be
 // truncated, and must not be imported in place of the real one.
-func unzip(mboxfile string) {
-	log.Printf("unzip %s to %s", mboxfile, tmpdir)
-	cmd := exec.Command("/usr/bin/unzip", "-o", "-d", tmpdir, argPath(mboxfile))
-	err := cmd.Run()
-	if err != nil {
-		log.Printf("unzip failed mboxfile='%s' err='%v' =exit(1)", mboxfile, err)
-		os.Exit(1)
-	}
-} // end func unzip
-
-func unzip7(mboxfile string) {
-	log.Printf("unzip7 %s to %s", mboxfile, tmpdir)
-	cmd := exec.Command("/usr/bin/7z", "x", "-o"+tmpdir, "-y", argPath(mboxfile))
-	err := cmd.Run()
-	if err != nil {
-		log.Printf("unzip7 failed mboxfile='%s' err='%v' =exit(1)", mboxfile, err)
-		os.Exit(1)
-	}
-} // end func unzip7
-
-// gunzip decompresses archive to dst in-process. It used to run gzip, or
-// /scripts/gunzip.sh when a tmpdir was set, a script that is not in the
-// repository. compress/gzip reads concatenated members as one stream, as
-// the usenet-* archives need: they hold one gzip member per article.
-func gunzip(archive, dst string) {
-	log.Printf("gunzip %s to %s", archive, dst)
-	err := gunzipTo(archive, dst)
-	if err != nil {
-		log.Printf("gunzip failed mboxfile='%s' err='%v'", archive, err)
+func unpack(kind string, fn func(archive, dst string) error, archive, dst string) {
+	log.Printf("%s %s to %s", kind, archive, dst)
+	if err := fn(archive, dst); err != nil {
+		log.Printf("%s failed mboxfile='%s' err='%v' =exit(1)", kind, archive, err)
 		os.Remove(dst)
 		os.Exit(1)
 	}
-} // end func gunzip
+}
 
+// gunzipTo decompresses archive to dst in-process. It used to run gzip, or
+// /scripts/gunzip.sh when a tmpdir was set, a script that is not in the
+// repository. compress/gzip reads concatenated members as one stream, as
+// the usenet-* archives need: they hold one gzip member per article.
 func gunzipTo(archive, dst string) error {
 	in, err := os.Open(archive)
 	if err != nil {
@@ -455,11 +437,62 @@ func gunzipTo(archive, dst string) error {
 	if err != nil {
 		return err
 	}
+	return writeTo(dst, zr)
+}
+
+// unzipTo extracts the entry named like dst from a zip archive. It replaces
+// /usr/bin/unzip -o -d tmpdir, which also unpacked every other entry and
+// left them in tmpdir. Every usenet-clari zip holds just NAME.mbox.
+func unzipTo(archive, dst string) error {
+	z, err := zip.OpenReader(archive)
+	if err != nil {
+		return err
+	}
+	defer z.Close()
+	name := filepath.Base(dst)
+	for _, f := range z.File {
+		if f.Name != name {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		return writeTo(dst, rc) // the zip reader checks the CRC at the end
+	}
+	return fmt.Errorf("no entry '%s' in the archive", name)
+}
+
+// un7zTo is unzipTo for 7z archives, replacing /usr/bin/7z x. The
+// FULL-USENET-BACKUP items hold just NAME.mbox, LZMA2-compressed.
+func un7zTo(archive, dst string) error {
+	z, err := sevenzip.OpenReader(archive)
+	if err != nil {
+		return err
+	}
+	defer z.Close()
+	name := filepath.Base(dst)
+	for _, f := range z.File {
+		if f.Name != name {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		return writeTo(dst, rc)
+	}
+	return fmt.Errorf("no entry '%s' in the archive", name)
+}
+
+func writeTo(dst string, r io.Reader) error {
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, zr); err != nil {
+	if _, err := io.Copy(out, r); err != nil {
 		out.Close()
 		return err
 	}
@@ -946,8 +979,8 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 
 	} else if is_zip {
 		// mbox is zip
-		unzip(mboxfile)
 		mboxfiletrim = extractedPath(mboxfile, ".zip")
+		unpack("unzip", unzipTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -959,7 +992,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	} else if is_gzp {
 		// mbox is gzip
 		mboxfiletrim = extractedPath(mboxfile, ".gz")
-		gunzip(mboxfile, mboxfiletrim)
+		unpack("gunzip", gunzipTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("gunzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -969,8 +1002,8 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		reader, src = openMboxFile(mboxfiletrim)
 	} else if is_zip7 {
 		// mbox is 7z
-		unzip7(mboxfile)
 		mboxfiletrim = extractedPath(mboxfile, ".7z")
+		unpack("un7z", un7zTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped 7z '%s' but not found '%s'", mboxfile, mboxfiletrim)

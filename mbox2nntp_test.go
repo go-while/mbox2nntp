@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -693,6 +694,66 @@ func TestGunzipToConcatenatedMembers(t *testing.T) {
 	got, _ := os.ReadFile(dst)
 	if want := "From a\nfirst\nFrom b\nsecond\n"; string(got) != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// unzipTo and un7zTo extract only the entry named like dst, overwriting a
+// file left by an earlier run, and fail when the archive lacks it.
+func TestUnzipTo(t *testing.T) {
+	dir := t.TempDir()
+	archive := filepath.Join(dir, "x.mbox.zip")
+	fh, err := os.Create(archive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zw := zip.NewWriter(fh)
+	for name, body := range map[string]string{"x.mbox": "From nobody\nmbox\n", "other.txt": "other\n"} {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.WriteString(w, body)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	fh.Close()
+	testExtractor(t, unzipTo, archive, "From nobody\nmbox\n")
+}
+
+func TestUn7zTo(t *testing.T) {
+	archive := filepath.Join(t.TempDir(), "x.mbox.7z")
+	data, err := os.ReadFile("testdata/x.mbox.7z") // made by 7z a -m0=LZMA2, with other.txt
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archive, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	testExtractor(t, un7zTo, archive, "From nobody Thu Dec  8 12:55:04 2016\nSubject: 7z\nMessage-ID: <7z@test>\n\nbody\n")
+}
+
+func testExtractor(t *testing.T, fn func(archive, dst string) error, archive, want string) {
+	t.Helper()
+	out := t.TempDir()
+	dst := filepath.Join(out, "x.mbox")
+	if err := os.WriteFile(dst, []byte("left by an interrupted run, longer than the real file"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := fn(archive, dst); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(dst); string(got) != want {
+		t.Errorf("extracted %q, want %q", got, want)
+	}
+	if entries, _ := os.ReadDir(out); len(entries) != 1 {
+		t.Errorf("%d files in tmpdir, want only x.mbox", len(entries))
+	}
+	if err := fn(archive, filepath.Join(out, "y.mbox")); err == nil {
+		t.Error("missing entry: err = nil")
+	}
+	if err := fn(filepath.Join(out, "x.mbox"), filepath.Join(out, "z.mbox")); err == nil {
+		t.Error("not an archive: err = nil")
 	}
 }
 
