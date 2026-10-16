@@ -1,0 +1,5 @@
+# collections
+{"identifier": "giganews"} # https://archive.org/details/giganews @ gna.txt
+{"identifier": "usenethistorical"} # https://archive.org/details/usenethistorical
+{"identifier": "usenet"} # https://archive.org/details/usenet
+
