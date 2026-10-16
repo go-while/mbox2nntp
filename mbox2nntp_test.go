@@ -925,3 +925,21 @@ func TestIsBadDateLineMatchesRegex(t *testing.T) {
 		}
 	}
 }
+
+// I3, through the library: the last body line of an mbox with no final
+// newline reaches the article (go-lib-mbox2nntp 605980f).
+func TestFinalLineWithoutNewlineReachesBody(t *testing.T) {
+	mr, err := mbox.CreateMboxStream(strings.NewReader("From nobody Thu Dec  8 12:55:04 2016\n" +
+		"Subject: s\nMessage-ID: <last@test>\n\nfirst\nlast, no newline"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := mr.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := readBody(msg.BodyReader())
+	if want := []string{"first", "last, no newline"}; strings.Join(body, "|") != strings.Join(want, "|") {
+		t.Errorf("body = %q, want %q", body, want)
+	}
+}
