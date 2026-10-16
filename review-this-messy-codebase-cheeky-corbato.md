@@ -766,15 +766,25 @@ against a real INN.
   whose `sync.Mutex` is at its zero value is not a lock copy. The code is fine as written.
 - **RESOLVED — `gofmt -l` flags the file.** `gofmt -w` was run on `mbox2nntp.go` and
   `tsm/GlobalBools/GlobalBools.go` as a commit of its own, with no other change in it.
-- **RESOLVED (kept positional) — argument parsing**: `mbox2nntp.go:707` uses `if len(os.Args) == 7` for `PREFIX` while
+- **RESOLVED — argument parsing**: `mbox2nntp.go:707` uses `if len(os.Args) == 7` for `PREFIX` while
   the next block uses `>= 8`, so `PREFIX` is never set when 8 arguments are supplied. `PREFIX`
   is also never read anywhere. The usage string (line 725) omits arguments 6 and 7. Replace
   the positional chain with `flag`.
 
   **Done differently:** `PREFIX` is deleted and its slot (argument 6) is documented as
   unused, so existing command lines keep working. The usage message now lists every
-  argument, including `.noDROPBINARY`. Switching to `flag` would break every script that
-  calls the importer today, for no gain in behaviour, so it is left as an option.
+  argument, including `.noDROPBINARY`.
+
+  **Then replaced with `flag`** (`flags.go`): `-server`, `-workers`, `-tmpdir`,
+  `-dry-run`, `-keep-binary`, `-no-dos2unix`, `-dos2unix`, `-timeout`, `-max-tries`,
+  `-prehash`, `-lax-msgid`. The last five were compile-time settings; their defaults are
+  unchanged. The old positional form is still parsed, with a deprecation note in the log,
+  when the first two arguments are not flags. A directory input no longer needs a trailing
+  `/`. Writing the README turned up two dry-run bugs, both fixed. A dry run tried to
+  connect anyway, for up to 3 hours, even though `ihave` never uses the connection in
+  that mode. And it renamed its input to `.done` without sending anything, so a dry run
+  was enough to skip a file in every later batch run. Now a dry run needs no server and
+  never marks an input done. See `README.md`.
 - **RESOLVED — `DROPBINARY` is not honoured on the directory path**: `mbox2nntp.go:553` drops `=ybegin`
   unconditionally, while `mbox2nntp.go:1170` respects the flag. `read_file` now checks
   `DROPBINARY` too; `TestReadFileHonoursDropBinary` covers both settings.
@@ -1065,8 +1075,8 @@ var validid = regexp2.MustCompile(strings.Join(sepPatterns, "|"), 0)
 3. **F** — path and cleanup fixes; switch to `filepath.Join`/`filepath.Base`, replace
    `find.sh` with `filepath.WalkDir`, add `--` to the exec calls.  *(DONE)*
 4. **H** — unblock the build (`go-utils`), then `gofmt`, `go vet` clean, dead-code
-   deletion, `flag`-based arguments.  *(DONE — arguments kept positional and documented
-   instead of `flag`, so existing command lines still work)*
+   deletion, `flag`-based arguments.  *(DONE — `flag`-based, with the old positional form
+   still accepted)*
 5. **I2** — repair `mbox_test.go` so the library has a working test suite again. Do this
    *before* touching `validid`: it is the reason the regex could never be changed safely.
    *(DONE)*

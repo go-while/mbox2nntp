@@ -9,6 +9,7 @@ import (
 	"compress/gzip"
 	"encoding/hex"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -21,7 +22,6 @@ import (
 	"strings"
 	//"regexp"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 	//"runtime"
@@ -70,6 +70,7 @@ var (
 	MAX_TRIES      = 10
 	retryDelay     = time.Second // backoff unit between tries
 	DRYRUN         bool
+	NODOS2UNIX     bool // skip dos2unix: -no-dos2unix, or a .nodos2unix file in the working directory
 	globalBools    tsm_GlobalBools.GlobalBools
 	globalCounter  GlobalCounter
 	worker_channel chan *ArticleItem
@@ -518,7 +519,8 @@ func mboxhasZ(mboxfile string) bool {
 	return false
 } // end func mboxhasZ
 
-const DOS2UNIX = "/usr/bin/dos2unix"
+// DOS2UNIX is run on every mbox before parsing, unless NODOS2UNIX.
+var DOS2UNIX = "/usr/bin/dos2unix"
 
 // checkExecutable returns why path cannot be run, or nil.
 func checkExecutable(path string) error {
@@ -533,7 +535,7 @@ func checkExecutable(path string) error {
 }
 
 func dos2unix(mboxfile string) {
-	if fileExists(".nodos2unix") {
+	if NODOS2UNIX {
 		return
 	}
 	log.Printf("proc dos2unix %s", mboxfile)
@@ -786,65 +788,25 @@ func main() {
 	worker_channel = make(chan *ArticleItem, WORKER_CHAN_SIZE)
 	globalCounter.initCounter("worker_done")
 
-	mboxfile := ""
-	//nntpserv := ""
-	if len(os.Args) >= 3 && os.Args[1] != "" && os.Args[2] != "" {
-
-		if strings.HasSuffix(os.Args[1], "/") && dirExists(os.Args[1]) {
-			mboxfile = os.Args[1]
-		} else if fileExists(os.Args[1]) {
-			mboxfile = os.Args[1]
-		}
-		nntpserv = os.Args[2]
-
-		if len(os.Args) >= 4 {
-			MaxWorkers, err = strconv.Atoi(os.Args[3])
-			if err != nil {
-				log.Printf("ERROR: get MaxWorkers failed err='%v'", err)
-				os.Exit(1)
-			}
-		}
-
-		if len(os.Args) >= 5 {
-			atmpdir := os.Args[4]
-			if atmpdir != "." {
-				tmpdir = atmpdir
-			}
-		}
-		log.Printf("tmpdir=%s", tmpdir)
-
-		if len(os.Args) >= 6 {
-			if os.Args[5] == "DRYRUN" {
-				DRYRUN = true
-			}
-
-		}
-
-		log.Printf("DRYRUN=%t", DRYRUN)
-
-		// os.Args[6] was PREFIX, which nothing read (and which was only
-		// set when exactly 7 arguments were given). Its slot stays so
-		// that existing command lines keep working.
-		if len(os.Args) >= 8 {
-			if os.Args[7] != "" { // /path/to/.noDROPBINARY
-				if utils.FileExists(os.Args[7]) {
-					log.Printf(".noDROPBINARY = '%s'", os.Args[7])
-					DROPBINARY = false
-				}
-			}
-		}
-
+	opts, err := parseArgs(os.Args[0], os.Args[1:], os.Stderr)
+	if err == flag.ErrHelp {
+		os.Exit(0)
 	}
-
-	if mboxfile == "" || nntpserv == "" || MaxWorkers <= 0 {
-		log.Printf("Usage: %s file.mbox[.gz|.zip|.7z]|file.bag|dir/ nntp.server:119 [WORKERS [TMPDIR [DRYRUN [- [/path/to/.noDROPBINARY]]]]]", os.Args[0])
-		log.Printf("  WORKERS: connections (default 1); TMPDIR: where archives are unpacked (default .)")
-		log.Printf("  DRYRUN: the literal word, or anything else to send; the sixth argument is unused")
-		log.Printf("  .noDROPBINARY: if this file exists, yEnc (=ybegin) articles are sent instead of dropped")
-		log.Printf("args: %v", os.Args)
+	if err != nil {
+		log.Printf("ERROR: %v (see -h)", err)
+		os.Exit(2)
+	}
+	if opts.legacy {
+		log.Printf("NOTE: positional arguments are deprecated, use flags (see -h)")
+	}
+	opts.apply()
+	mboxfile := opts.input
+	if !fileExists(mboxfile) && !dirExists(mboxfile) {
+		log.Printf("ERROR: input not found '%s'", mboxfile)
 		os.Exit(1)
 	}
-
+	log.Printf("server=%s DRYRUN=%t DROPBINARY=%t nodos2unix=%t prehash=%t laxmid=%t timeout=%v max-tries=%d",
+		nntpserv, DRYRUN, DROPBINARY, NODOS2UNIX, PREHASH_MODE, LAXMID, NNTP_TIMEOUT, MAX_TRIES)
 	log.Printf("MaxWorkers=%d", MaxWorkers)
 	log.Printf("TMPDIR=%s", tmpdir)
 
@@ -893,9 +855,9 @@ func main() {
 
 	// dos2unix runs on every mbox (not on a directory). Check for it now,
 	// before anything is unpacked, instead of failing after the unzip.
-	if !is_dir && !fileExists(".nodos2unix") {
+	if !is_dir && !NODOS2UNIX {
 		if err := checkExecutable(DOS2UNIX); err != nil {
-			log.Printf("ERROR: dos2unix is required: %v (install it, or create .nodos2unix to run without it)", err)
+			log.Printf("ERROR: dos2unix is required: %v (install it, point -dos2unix at it, or pass -no-dos2unix)", err)
 			os.Exit(1)
 		}
 	}
@@ -941,7 +903,14 @@ func main() {
 	log.Printf("Done sending. %d/%d dup=%d e437=%d err=%d filter=%d", tsentcnt, ttot, tnntpdup435, tnntp437, tnntperr, tnntp999)
 	log.Printf("END: mboxfile='%s' took=%d remaining sent=%d", mboxfile, took, tsentcnt)
 
-	if is_zip || is_zip7 || is_gzp || is_bag {
+	if DRYRUN {
+		// nothing was sent, so nothing is done: only remove what was unpacked
+		if (is_zip || is_zip7 || is_gzp) && utils.FileExists(mboxfile) {
+			log.Printf("cleanup: rm '%s'", mboxfile)
+			rmmbox(mboxfile)
+		}
+		log.Printf("dry run: '%s' not marked done", mboxfileZ)
+	} else if is_zip || is_zip7 || is_gzp || is_bag {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)
 			// proc returned the extracted file's path. Only an archive has
@@ -1332,7 +1301,7 @@ func worker(wid int) {
 	var cerr error
 	retries := 3600
 loop_CB:
-	for {
+	for !DRYRUN { // a dry run sends nothing, so it needs no server
 		srvtp, cliwriter, cerr = connectBackend(nntpserv)
 		if cerr != nil {
 			log.Printf("Worker %d) connect failed rserver=%s cerr='%v'", wid, nntpserv, cerr)
