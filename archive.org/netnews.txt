@@ -1,0 +1,21 @@
+{"identifier": "NN-1982"}
+{"identifier": "nn-1992-16"}
+{"identifier": "nn-1992-17"}
+{"identifier": "nn-1992-18"}
+{"identifier": "nn-1992-19"}
+{"identifier": "nn-1992-20"}
+{"identifier": "nn-1992-22"}
+{"identifier": "nn-1992-23"}
+{"identifier": "nn-1992-25"}
+{"identifier": "nn-1992-26"}
+{"identifier": "nn-1992-27"}
+{"identifier": "nn-1992-30"}
+{"identifier": "nn-1992-31"}
+{"identifier": "nn-1992-7"}
+{"identifier": "nn-1993-1"}
+{"identifier": "nn-1993-3"}
+{"identifier": "NetNewsOffline-Vol1"}
+{"identifier": "NetNewsOffline-Vol2"}
+{"identifier": "alaska-software-com-netnews"}
+{"identifier": "ancientfj-2004-10-18"}
+
