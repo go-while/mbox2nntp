@@ -213,6 +213,7 @@ func TestUnreadBytesSeesEarlyStop(t *testing.T) {
 	path := writeMbox(t, 100)
 
 	mr, src := openMboxFile(path)
+	defer src.Close()
 	n := 0
 	for {
 		msg, err := mr.ReadMessage()
@@ -232,6 +233,7 @@ func TestUnreadBytesSeesEarlyStop(t *testing.T) {
 	// Skipping a body leaves the stream inside it: the next ReadMessage
 	// finds no separator and returns io.EOF after one message.
 	mr, src = openMboxFile(path)
+	defer src.Close()
 	if _, err := mr.ReadMessage(); err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +254,29 @@ func TestOpenMboxFileEmpty(t *testing.T) {
 	mr, src := openMboxFile(path)
 	if mr != nil || src != nil {
 		t.Errorf("openMboxFile(empty) = %v, %v; want nil, nil", mr, src)
+	}
+}
+
+// proc closes the mbox before main renames it to .done or removes it:
+// Windows refuses both on an open file.
+func TestEOFReaderCloseReleasesFile(t *testing.T) {
+	path := writeMbox(t, 3)
+	mr, src := openMboxFile(path)
+	for {
+		msg, err := mr.ReadMessage()
+		if err != nil {
+			break
+		}
+		io.Copy(io.Discard, msg.BodyReader())
+	}
+	if err := src.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path, path+".done"); err != nil {
+		t.Fatalf("rename after Close: %v", err)
+	}
+	if err := os.Remove(path + ".done"); err != nil {
+		t.Fatalf("remove after Close: %v", err)
 	}
 }
 

@@ -1023,6 +1023,9 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		return mboxfile
 	}
 
+	// closed before main renames or removes it
+	defer src.Close()
+
 	// archives return the extracted file's name: main removes it after
 	// moving the archive to .done
 	if is_zip || is_zip7 || is_gzp {
@@ -1070,7 +1073,14 @@ func dirExists(dir string) bool {
 // message should start, so this is how iterateMbox tells the two apart.
 type eofReader struct {
 	r      io.Reader
+	f      *os.File
 	sawEOF bool
+}
+
+// Close closes the mbox file. It must be closed before the file is renamed
+// or removed: Windows refuses both on an open file.
+func (e *eofReader) Close() error {
+	return e.f.Close()
 }
 
 func (e *eofReader) Read(p []byte) (int, error) {
@@ -1106,7 +1116,7 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 		return nil, nil
 	}
 	// was 1 GiB, allocated per file and filled on any mbox that large
-	src := &eofReader{r: bufio.NewReaderSize(fh, 1024*1024)}
+	src := &eofReader{r: bufio.NewReaderSize(fh, 1024*1024), f: fh}
 	mboxReader, err := mbox.CreateMboxStream(src)
 	if err != nil {
 		log.Printf("Can't create mbox reader: %#v", err)
