@@ -4,8 +4,8 @@ package main
 // github.com/go-while/nntp-overview v0.0.0-20250520152009-98ae78251105
 // (overview.go). They were the only code mbox2nntp used from that package,
 // which pulls in nntp-storage, nntp-mmap, mysql and redis, and does not
-// build on Windows. TestParseHeaderKeysMatchesOverview held the copy to the
-// original until the import was dropped.
+// build on Windows. TestParseHeaderKeysAsOverview holds the copy to the
+// original's recorded behaviour.
 
 import (
 	"fmt"

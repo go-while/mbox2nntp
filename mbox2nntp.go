@@ -29,9 +29,7 @@ import (
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	//"github.com/edsrzf/mmap-go"
 	"github.com/go-while/go-lib-mbox2nntp"
-	"github.com/go-while/go-utils"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
-	"github.com/go-while/nntp-overview"
 	//"nntp/data/overview"
 )
 
@@ -724,7 +722,7 @@ func read_file(file_path string) string {
 
 	//msgid := extract_msgid(header)
 	//headermap, keysorder, msgid, err := overview.ParseHeaderKeys(&head)
-	_, _, msgid, err := overview.ParseHeaderKeys(header, LAXMID)
+	_, _, msgid, err := ParseHeaderKeys(header, LAXMID)
 	if msgid == "" || err != nil {
 		log.Printf("Error read_file(fp='%s') msgid not found err='%v'", file_path, err)
 	}
@@ -905,7 +903,7 @@ func main() {
 
 	if DRYRUN {
 		// nothing was sent, so nothing is done: only remove what was unpacked
-		if (is_zip || is_zip7 || is_gzp) && utils.FileExists(mboxfile) {
+		if (is_zip || is_zip7 || is_gzp) && fileExists(mboxfile) {
 			log.Printf("cleanup: rm '%s'", mboxfile)
 			rmmbox(mboxfile)
 		}
@@ -916,7 +914,7 @@ func main() {
 			// proc returned the extracted file's path. Only an archive has
 			// one: for a .bag it is the source itself, which the old
 			// tmpdir+"/"+name check removed whenever the run was not done.
-			if (is_zip || is_zip7 || is_gzp) && utils.FileExists(mboxfile) {
+			if (is_zip || is_zip7 || is_gzp) && fileExists(mboxfile) {
 				log.Printf("cleanup: rm '%s'", mboxfile)
 				rmmbox(mboxfile)
 			}
@@ -1204,7 +1202,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			}
 		}*/
 		msgid := ""
-		headermap, keysorder, msgid, err := overview.ParseHeaderKeys(head, LAXMID)
+		headermap, keysorder, msgid, err := ParseHeaderKeys(head, LAXMID)
 
 		if msgid == "" || err != nil {
 			log.Printf("[iterateMbox] mbox %s msgid not found msgnum=%d \n map='%v' \n ko='%v' \n err='%v'", mboxfile, msgNumber, headermap, keysorder, err)
