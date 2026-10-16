@@ -753,6 +753,16 @@ against a real INN.
   never ran. If the tree ever becomes a nuisance, split those four helpers out of
   `nntp-overview` rather than patching around `nntp-storage`.
 
+  **RESOLVED — done, because the tree blocked Windows and macOS.** `nntp-mmap` does not
+  build on Windows and `go-utils` (`syscall.Fallocate`) not on macOS. Only
+  `ParseHeaderKeys` (and `GetMessageID` under it) was actually called; the other names
+  appear in comments only. Both were copied into `headers.go` unchanged, and compared with
+  the original on every header block in the corpus (10,555,466 comparisons, lax and
+  strict, none different). `go.mod` now needs `regexp2`, `go-lib-mbox2nntp` and
+  `bodgit/sevenzip`. One bug came along with the copy and is marked, not fixed:
+  `GetMessageID`'s strict mode tests the literal `"msgid"` for an `@`, so without
+  `-lax-msgid` (on by default) no Message-ID is accepted.
+
 - **RESOLVED — the committed `mbox2nntp` binary** is no longer tracked, and `.gitignore`
   names `/mbox2nntp`.
 - **RESOLVED — `go vet ./...` is clean.** It had reported three `log.Printf` defects,
@@ -785,6 +795,16 @@ against a real INN.
   that mode. And it renamed its input to `.done` without sending anything, so a dry run
   was enough to skip a file in every later batch run. Now a dry run needs no server and
   never marks an input done. See `README.md`.
+- **RESOLVED — runs on Windows and macOS.** Beyond the dependency tree above:
+  `unzip` and `7z` were run from `/usr/bin`, and are now replaced by `archive/zip` and
+  `bodgit/sevenzip` (all 891 usenet-clari zips and the FULL-USENET-BACKUP 7z unpack
+  byte-identical to the tools). `dos2unix` ran on every mbox, rewrote a plain `.mbox` in
+  place, and was checked by Unix exec bits Windows never reports; it now runs only with
+  `-dos2unix PATH`. Across all 2,262 corpus inputs (556 containing CR) every article goes
+  out byte-identical without it. The mbox file was never closed, so on Windows the `.done`
+  rename and the tmpdir cleanup would have failed after every article had been sent; it
+  is now closed first. The `find | sort -V` comparison tests skip without GNU sort, and
+  `.github/workflows/test.yml` runs the tests on all three systems.
 - **RESOLVED — `DROPBINARY` is not honoured on the directory path**: `mbox2nntp.go:553` drops `=ybegin`
   unconditionally, while `mbox2nntp.go:1170` respects the flag. `read_file` now checks
   `DROPBINARY` too; `TestReadFileHonoursDropBinary` covers both settings.

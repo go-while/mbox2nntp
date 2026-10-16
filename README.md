@@ -8,23 +8,20 @@ Each run takes one input: an mbox, a compressed mbox, or a directory of article 
 
 ## Build
 
+Runs on Linux, Windows and macOS, as one binary that needs no other programs:
+`.gz`, `.zip` and `.7z` archives are unpacked in-process.
+
 ```
-go build -o mbox2nntp .
+go build -o mbox2nntp .                                 # for this machine
+GOOS=windows GOARCH=amd64 go build -o mbox2nntp.exe .   # Windows
+GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
+GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 ```
 
 Needs Go 1.27.1 or later. All dependencies resolve from GitHub. The mbox parser is
 [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
-`github.com/sam-falvo/mbox`.
-
-External programs, used only for some inputs:
-
-| program | used for |
-|---|---|
-| `/usr/bin/dos2unix` | every mbox input, unless `-no-dos2unix` (checked at startup) |
-| `/usr/bin/unzip` | `.mbox.zip` |
-| `/usr/bin/7z` | `.mbox.7z` |
-
-`.mbox.gz` is unpacked in-process, and directories are walked in-process.
+`github.com/sam-falvo/mbox`. 7z archives are read with
+[`github.com/bodgit/sevenzip`](https://github.com/bodgit/sevenzip).
 
 ## Usage
 
@@ -48,8 +45,8 @@ mbox2nntp [flags] -dry-run INPUT
 | `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked |
 | `-dry-run` | off | parse and rewrite articles, but connect to no server and send nothing; the input is never marked done |
 | `-keep-binary` | off | send yEnc (`=ybegin`) articles instead of dropping them |
-| `-no-dos2unix` | off | skip `dos2unix`; a `.nodos2unix` file in the working directory does the same |
-| `-dos2unix PATH` | `/usr/bin/dos2unix` | where `dos2unix` is |
+| `-dos2unix PATH` | none | run this `dos2unix` on each mbox first, as older versions always did; not needed, see below |
+| `-no-dos2unix` | off | do not run `-dos2unix`; a `.nodos2unix` file in the working directory does the same. Kept for old scripts |
 | `-timeout D` | `2m` | limit on each read or write on a server connection |
 | `-max-tries N` | `10` | tries per article after a `436` or a lost connection |
 | `-prehash` | on | send `IHAVE <msgid> <sha256-of-msgid>`; `-prehash=false` sends plain `IHAVE <msgid>` |
@@ -61,14 +58,20 @@ Examples:
 mbox2nntp -server localhost:119 -workers 4 -tmpdir /var/tmp/m2n clari.world.top.mbox.gz
 mbox2nntp -dry-run 0.akita-inu.20140617.mbox.gz
 mbox2nntp -server localhost:119 /srv/oldspool/comp/lang/
+mbox2nntp.exe -server news.example:119 -tmpdir D:\tmp C:\archives\clari.world.top.mbox.zip
+mbox2nntp.exe -server news.example:119 C:\spool\comp\lang
 ```
 
-**A plain `NAME.mbox` or `NAME.bag` is changed in place:** `dos2unix -f` rewrites the
-file itself. Archives
-are unpacked into `-tmpdir` first, so their contents are converted there. Use
-`-no-dos2unix` or work on a copy if the source must stay byte-identical. The parser
-handles CRLF itself, so the importer works without `dos2unix`; it is kept on by default
-because that is how the existing imports were run.
+The input is only read, never changed, apart from the `.done` rename below.
+
+**dos2unix:** older versions ran `/usr/bin/dos2unix -f` on every mbox, which rewrote a
+plain `NAME.mbox` or `NAME.bag` in place. The parser handles CRLF line endings itself:
+across the whole archive.org corpus (gna-clari, usenet-clari and akita-inu) every article
+comes out byte-identical with and without it, so it is no longer run. If you want it
+anyway, `-dos2unix` takes its path or name: `dos2unix` from a Linux distribution or
+Homebrew (`brew install dos2unix`), or `dos2unix.exe` on Windows, which Git for Windows
+ships in `C:\Program Files\Git\usr\bin`. It then rewrites a plain mbox in place, as
+before.
 
 ### The old positional form
 
@@ -100,7 +103,7 @@ come back as `435` and cost little.
 
 The process exits 0 when it finishes a run, whether or not the input was marked done; the
 `.done` rename is the signal. It exits 2 on a command-line error, and 1 on a fatal
-error (an input that cannot be opened or unpacked, a missing `dos2unix`).
+error (an input that cannot be opened or unpacked, a `-dos2unix` that cannot be found).
 
 ## What is sent
 
@@ -184,7 +187,8 @@ go test ./...
 
 The tests need no network, server or corpus. They cover article corruption on the wire,
 connection failures against a scripted fake server, header rewriting, archive handling and
-the command line.
+the command line. GitHub Actions runs them on Linux, Windows and macOS
+(`.github/workflows/test.yml`).
 
 `review-this-messy-codebase-cheeky-corbato.md` is the code review this version came out
 of. It lists every bug found and fixed, with measurements against the archive.org corpus,

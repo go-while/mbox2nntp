@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -627,12 +628,26 @@ func TestWorkerGivesUpAfterMaxTries(t *testing.T) {
 	}
 }
 
-// walkFiles replaces /bin/find.sh, which was
-// `find "$1" -mindepth 1 -type f | sort -V`. Same files, same order.
-func TestWalkFilesMatchesFindSh(t *testing.T) {
+// needGNUFindSort skips the comparisons with find.sh unless there is a
+// find and a GNU sort to compare with: Windows has no sh and a find.exe of
+// its own, and macOS sort -V is BSD's.
+func needGNUFindSort(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs sh, find and GNU sort -V")
+	}
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("find not installed")
 	}
+	if out, err := exec.Command("sort", "--version").Output(); err != nil || !strings.Contains(string(out), "GNU coreutils") {
+		t.Skip("sort is not GNU coreutils sort")
+	}
+}
+
+// walkFiles replaces /bin/find.sh, which was
+// `find "$1" -mindepth 1 -type f | sort -V`. Same files, same order.
+func TestWalkFilesMatchesFindSh(t *testing.T) {
+	needGNUFindSort(t)
 	root := t.TempDir()
 	files := []string{
 		"comp/lang/go/1", "comp/lang/go/2", "comp/lang/go/10", "comp/lang/go/100",
@@ -764,7 +779,7 @@ func TestExtractedPathAndArgPath(t *testing.T) {
 		{"/var/tmp/m2n", "x.gz.mbox.gz", ".gz", "/var/tmp/m2n/x.gz.mbox"},
 	} {
 		tmpdir = tc.tmp
-		if got := extractedPath(tc.archive, tc.ext); got != tc.want {
+		if got := extractedPath(tc.archive, tc.ext); got != filepath.FromSlash(tc.want) {
 			t.Errorf("extractedPath(%q, %q) with tmpdir %q = %q, want %q", tc.archive, tc.ext, tc.tmp, got, tc.want)
 		}
 	}
@@ -777,9 +792,7 @@ func TestExtractedPathAndArgPath(t *testing.T) {
 
 // Generated names against the real find | sort -V, fixed seeds.
 func TestWalkFilesMatchesFindShGenerated(t *testing.T) {
-	if _, err := exec.LookPath("find"); err != nil {
-		t.Skip("find not installed")
-	}
+	needGNUFindSort(t)
 	const alphabet = "0123456789ab.~-+Z_"
 	for seed := int64(1); seed <= 20; seed++ {
 		rng := rand.New(rand.NewSource(seed))
