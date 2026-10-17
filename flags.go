@@ -25,6 +25,8 @@ type options struct {
 	noDos2unix bool
 	dos2unix   string
 	sevenZip   string
+	xz         string
+	zstd       string
 	timeout    time.Duration
 	maxTries   int
 	prehash    bool
@@ -42,6 +44,8 @@ INPUT is one of:
   NAME.mbox.gz          gzip-compressed mbox
   NAME.mbox.zip         zip archive holding NAME.mbox
   NAME.mbox.7z          7z archive holding NAME.mbox
+  NAME.usenet           a UAT archive (Usenet Archive Toolkit), needs zstd;
+                        also NAME.usenet.xz and NAME.usenet.7z
   DIR                   a directory tree with one article per file
 
 Flags:
@@ -77,6 +81,8 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&o.noDos2unix, "no-dos2unix", false, "do not run -dos2unix (same as a .nodos2unix file in the working directory); kept for old scripts")
 	fs.StringVar(&o.dos2unix, "dos2unix", o.dos2unix, "run the dos2unix at `PATH` on each mbox first, rewriting a plain .mbox in place; off by default, not needed")
 	fs.StringVar(&o.sevenZip, "7z", "", "the 7-Zip program at `PATH` that unpacks .7z inputs (default: 7z, 7zz or 7za in PATH)")
+	fs.StringVar(&o.xz, "xz", "", "the xz program at `PATH` for .usenet.xz inputs (default: xz in PATH, else 7-Zip)")
+	fs.StringVar(&o.zstd, "zstd", "", "the zstd program at `PATH` for .usenet inputs (default: zstd in PATH)")
 	fs.DurationVar(&o.timeout, "timeout", o.timeout, "limit on each read or write on a server connection")
 	fs.IntVar(&o.maxTries, "max-tries", o.maxTries, "tries per article after 436 or a lost connection, then it counts as an error")
 	fs.BoolVar(&o.prehash, "prehash", o.prehash, "send \"IHAVE <msgid> <sha256>\"; -prehash=false sends plain \"IHAVE <msgid>\"")
@@ -153,6 +159,8 @@ func (o *options) apply() {
 	NODOS2UNIX = o.noDos2unix || fileExists(".nodos2unix")
 	DOS2UNIX = o.dos2unix
 	unpack.SevenZip = o.sevenZip
+	unpack.Xz = o.xz
+	unpack.Zstd = o.zstd
 	NNTP_TIMEOUT = o.timeout
 	MAX_TRIES = o.maxTries
 	PREHASH_MODE = o.prehash

@@ -12,13 +12,13 @@ import (
 
 func TestParseArgsFlags(t *testing.T) {
 	o, err := parseArgs("m", []string{"-server", "news:119", "-workers", "4", "-tmpdir", "/t",
-		"-dry-run", "-keep-binary", "-no-dos2unix", "-dos2unix", "/opt/d2u", "-7z", "/opt/7zz", "-timeout", "30s",
+		"-dry-run", "-keep-binary", "-no-dos2unix", "-dos2unix", "/opt/d2u", "-7z", "/opt/7zz", "-xz", "/opt/xz", "-zstd", "/opt/zstd", "-timeout", "30s",
 		"-max-tries", "3", "-prehash=false", "-lax-msgid=false", "a.mbox.gz"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := options{input: "a.mbox.gz", server: "news:119", workers: 4, tmpdir: "/t", dryRun: true,
-		keepBinary: true, noDos2unix: true, dos2unix: "/opt/d2u", sevenZip: "/opt/7zz", timeout: 30 * time.Second,
+		keepBinary: true, noDos2unix: true, dos2unix: "/opt/d2u", sevenZip: "/opt/7zz", xz: "/opt/xz", zstd: "/opt/zstd", timeout: 30 * time.Second,
 		maxTries: 3, prehash: false, laxMsgid: false}
 	if *o != want {
 		t.Errorf("got %+v\nwant %+v", *o, want)
@@ -91,7 +91,7 @@ func TestParseArgsHelp(t *testing.T) {
 	if _, err := parseArgs("mbox2nntp", []string{"-h"}, &out); err != flag.ErrHelp {
 		t.Fatalf("err = %v, want flag.ErrHelp", err)
 	}
-	for _, s := range []string{"Usage: mbox2nntp [flags] -server HOST:PORT INPUT", "-keep-binary", "-no-dos2unix", "NAME.mbox.7z"} {
+	for _, s := range []string{"Usage: mbox2nntp [flags] -server HOST:PORT INPUT", "-keep-binary", "-no-dos2unix", "NAME.mbox.7z", "NAME.usenet"} {
 		if !strings.Contains(out.String(), s) {
 			t.Errorf("help lacks %q:\n%s", s, out.String())
 		}

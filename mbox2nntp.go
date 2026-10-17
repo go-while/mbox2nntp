@@ -803,6 +803,7 @@ func main() {
 	is_mbx := false
 	is_dir := false
 	is_bag := false
+	uatsuffix := uatSuffix(mboxfile) // a UAT archive: .usenet, .usenet.xz, .usenet.7z
 	group := ""
 
 	if strings.HasSuffix(mboxfile, ".mbox.zip") {
@@ -827,6 +828,9 @@ func main() {
 	} else if strings.HasSuffix(mboxfile, ".bag") {
 		is_bag = true
 
+	} else if uatsuffix != "" {
+		group = strings.TrimSuffix(mboxfile, uatsuffix)
+
 	} else if strings.HasSuffix(mboxfile, "/") {
 		if !dirExists(mboxfile) {
 			log.Printf("ERROR: dir not found '%s'", mboxfile)
@@ -835,7 +839,7 @@ func main() {
 		is_dir = true
 	}
 
-	if !is_mbx && !is_gzp && !is_zip && !is_zip7 && !is_dir && !is_bag {
+	if !is_mbx && !is_gzp && !is_zip && !is_zip7 && !is_dir && !is_bag && uatsuffix == "" {
 		log.Printf("file %s is not an mboxfile?", mboxfile)
 		os.Exit(1)
 	}
@@ -858,7 +862,7 @@ func main() {
 	//os.Exit(1)
 
 	mboxfileZ := ""
-	if is_zip || is_zip7 || is_gzp || is_mbx || is_bag {
+	if is_zip || is_zip7 || is_gzp || is_mbx || is_bag || uatsuffix != "" {
 		mboxfileZ = mboxfile
 		my_mboxfile = "-" + filepath.Base(mboxfile)
 		log.Printf("mboxfileZ = %s", mboxfileZ)
@@ -870,7 +874,13 @@ func main() {
 
 	log.Printf("START: mboxfile = %s", mboxfile)
 
-	mboxfile = proc(mboxfile, is_zip, is_zip7, is_gzp, is_mbx, is_dir, is_bag)
+	if uatsuffix != "" {
+		mboxfile = procUAT(mboxfile, uatsuffix)
+	} else {
+		mboxfile = proc(mboxfile, is_zip, is_zip7, is_gzp, is_mbx, is_dir, is_bag)
+	}
+	// an archive was unpacked into tmpdir: mboxfile is that copy
+	unpacked := is_zip || is_zip7 || is_gzp || uatsuffix == ".usenet.xz" || uatsuffix == ".usenet.7z"
 	if is_dir {
 		globalBools.SetGB("feeder_done", true)
 		for {
@@ -897,18 +907,18 @@ func main() {
 
 	if DRYRUN {
 		// nothing was sent, so nothing is done: only remove what was unpacked
-		if (is_zip || is_zip7 || is_gzp) && fileExists(mboxfile) {
+		if unpacked && fileExists(mboxfile) {
 			log.Printf("cleanup: rm '%s'", mboxfile)
 			rmmbox(mboxfile)
 		}
 		log.Printf("dry run: '%s' not marked done", mboxfileZ)
-	} else if is_zip || is_zip7 || is_gzp || is_bag {
+	} else if is_zip || is_zip7 || is_gzp || is_bag || uatsuffix != "" {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)
 			// proc returned the extracted file's path. Only an archive has
 			// one: for a .bag it is the source itself, which the old
 			// tmpdir+"/"+name check removed whenever the run was not done.
-			if (is_zip || is_zip7 || is_gzp) && fileExists(mboxfile) {
+			if unpacked && fileExists(mboxfile) {
 				log.Printf("cleanup: rm '%s'", mboxfile)
 				rmmbox(mboxfile)
 			}
@@ -1255,6 +1265,13 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 	//close(worker_channel)
 
+	finishFeeding(stoppedEarly)
+} // end func iterateMbox
+
+// finishFeeding is called when the reader has queued its last article: it
+// waits for the workers and decides whether the input is done. stoppedEarly
+// means the reader did not get through the whole input.
+func finishFeeding(stoppedEarly bool) {
 	globalBools.SetGB("feeder_done", true)
 
 	//log.Printf("Start sending.")
@@ -1291,7 +1308,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	} else if terrcnt == 0 && !stoppedEarly {
 		globalBools.SetGB("done", true)
 	}
-} // end func iterateMbox
+}
 
 func worker(wid int) {
 	//debug := false

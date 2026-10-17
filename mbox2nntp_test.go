@@ -1065,3 +1065,14 @@ func TestFinalLineWithoutNewlineReachesBody(t *testing.T) {
 		t.Errorf("body = %q, want %q", body, want)
 	}
 }
+
+func TestUATSuffix(t *testing.T) {
+	for in, want := range map[string]string{
+		"pl.test.usenet": ".usenet", "pl.test.usenet.xz": ".usenet.xz", "a/b/rec.games.rogue.usenet.7z": ".usenet.7z",
+		"x.mbox.7z": "", "x.usenet.gz": "", "x.usenet.done": "", "usenet": "",
+	} {
+		if got := uatSuffix(in); got != want {
+			t.Errorf("uatSuffix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
