@@ -24,7 +24,7 @@ GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 go build -o uatexport ./cmd/uatexport                   # the UAT exporter
 ```
 
-Needs Go 1.27.1 or later. Apart from the Go standard library, the only dependency is the
+Needs Go 1.27.2 or later. Apart from the Go standard library, the only dependency is the
 mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
 `github.com/sam-falvo/mbox`.
 
