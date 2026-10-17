@@ -430,10 +430,14 @@ func accepting(got chan<- string) nntpHandler {
 	}
 }
 
-// shortTimeouts makes failures fast for one test.
+// shortTimeouts makes failures fast for one test. Only a server that goes
+// silent waits out NNTP_TIMEOUT; every other exchange must fit in it on a
+// slow CI runner under -race, so it is not much shorter than 2s. The
+// tests' own limits (waitForClose, "still blocked", runWorker) are well
+// above it, and are only reached when a test fails.
 func shortTimeouts(t *testing.T) {
 	timeout, delay, tries := NNTP_TIMEOUT, retryDelay, MAX_TRIES
-	NNTP_TIMEOUT, retryDelay, MAX_TRIES = 300*time.Millisecond, 10*time.Millisecond, 3
+	NNTP_TIMEOUT, retryDelay, MAX_TRIES = 2*time.Second, 10*time.Millisecond, 3
 	t.Cleanup(func() { NNTP_TIMEOUT, retryDelay, MAX_TRIES = timeout, delay, tries })
 }
 
@@ -483,7 +487,7 @@ func TestIhaveResponseCodes(t *testing.T) {
 			expectIHAVE(r)
 			say(c, "335 send it")
 			readArticle(r)
-			waitForClose(c, r, 5*time.Second)
+			waitForClose(c, r, 15*time.Second)
 		}, -999},
 		{"garbled reply", func(c net.Conn, r *bufio.Reader) {
 			say(c, "200 ok")
@@ -520,8 +524,8 @@ func TestIhaveResponseCodes(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("%s: ihave = %d, want %d", tc.name, got, tc.want)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: ihave still blocked after 5s", tc.name)
+		case <-time.After(15 * time.Second):
+			t.Fatalf("%s: ihave still blocked after 15s", tc.name)
 		}
 		srvtp.Close()
 	}
@@ -545,10 +549,10 @@ func setupWorker(t *testing.T, addr string) {
 func runWorker(t *testing.T) {
 	t.Helper()
 	go worker(1)
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for globalCounter.getCounter("worker_done") != 1 {
 		if time.Now().After(deadline) {
-			t.Fatal("worker did not finish within 10s")
+			t.Fatal("worker did not finish within 30s")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -575,7 +579,7 @@ func TestWorkerSurvivesASessionGoingWrong(t *testing.T) {
 			expectIHAVE(r)
 			say(c, "335 send it")
 			readArticle(r)
-			closed <- waitForClose(c, r, 5*time.Second)
+			closed <- waitForClose(c, r, 15*time.Second)
 		},
 		accepting(got),
 	)
@@ -587,7 +591,7 @@ func TestWorkerSurvivesASessionGoingWrong(t *testing.T) {
 		if !ok {
 			t.Error("the client never closed the connection that went silent")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Error("the worker never opened a second connection")
 	}
 	if n := len(got); n != 1 {
