@@ -12,12 +12,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/dlclark/regexp2"
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
 
@@ -1036,8 +1036,9 @@ func TestReadBodyLongLine(t *testing.T) {
 }
 
 // isBadDateLine replaced a regexp2 pattern; it must give the same verdict.
+// The pattern has no \s or other class where regexp2 and Go's regexp differ.
 func TestIsBadDateLineMatchesRegex(t *testing.T) {
-	re := regexp2.MustCompile(`^[A-Z][a-z][a-z],\ `, 0)
+	re := regexp.MustCompile(`^[A-Z][a-z][a-z],\ `)
 	lines := []string{"", "Thu, 1 Jan 1970 00:00:00 +0000", "Thu,", "Thu, ", "thu, 1", "THu, 1",
 		"Thu,1", "Th\u00fc, 1", " Thu, 1", "Date: Thu, 1 Jan 1970", "Mon, ", "Zzz, x", "Aaa,  "}
 	r := rand.New(rand.NewSource(1))
@@ -1050,11 +1051,7 @@ func TestIsBadDateLineMatchesRegex(t *testing.T) {
 		lines = append(lines, string(b))
 	}
 	for _, l := range lines {
-		want, err := re.MatchString(l)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got := isBadDateLine(l); got != want {
+		if got, want := isBadDateLine(l), re.MatchString(l); got != want {
 			t.Errorf("isBadDateLine(%q) = %v, regex says %v", l, got, want)
 		}
 	}
