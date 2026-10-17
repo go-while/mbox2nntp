@@ -1,11 +1,11 @@
 package main
 
-// ParseHeaderKeys and GetMessageID are copied unchanged from
+// ParseHeaderKeys and GetMessageID are copied from
 // github.com/go-while/nntp-overview v0.0.0-20250520152009-98ae78251105
-// (overview.go). They were the only code mbox2nntp used from that package,
-// which pulls in nntp-storage, nntp-mmap, mysql and redis, and does not
-// build on Windows. TestParseHeaderKeysAsOverview holds the copy to the
-// original's recorded behaviour.
+// (overview.go), unchanged apart from the strict-mode fix in GetMessageID.
+// They were the only code mbox2nntp used from that package, which pulls in
+// nntp-storage, nntp-mmap, mysql and redis, and does not build on Windows. TestParseHeaderKeysAsOverview holds the copy to the
+// original's recorded behaviour, strict mode excepted.
 
 import (
 	"fmt"
@@ -160,10 +160,9 @@ func GetMessageID(amsgid string, laxmid bool) (string, error) {
 			return msgid, nil
 		}
 	} else if !laxmid {
-		// BUG: tests the literal "msgid", not the variable, so without
-		// laxmid nothing is accepted. Kept as copied; -lax-msgid is on by
-		// default.
-		if strings.HasPrefix(msgid, "<") && strings.Contains("msgid", "@") && strings.HasSuffix(msgid, ">") {
+		// The original tested the literal "msgid" for the "@", so without
+		// laxmid it accepted nothing.
+		if strings.HasPrefix(msgid, "<") && strings.Contains(msgid, "@") && strings.HasSuffix(msgid, ">") {
 			return msgid, nil
 		}
 	}

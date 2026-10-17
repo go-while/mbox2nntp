@@ -758,9 +758,10 @@ against a real INN.
   `ParseHeaderKeys` (and `GetMessageID` under it) was actually called; the other names
   appear in comments only. Both were copied into `headers.go` unchanged, and compared with
   the original on every header block in the corpus (10,555,466 comparisons, lax and
-  strict, none different). `go.mod` now needs `regexp2` and `go-lib-mbox2nntp`. One bug came along with the copy and is marked, not fixed:
-  `GetMessageID`'s strict mode tests the literal `"msgid"` for an `@`, so without
-  `-lax-msgid` (on by default) no Message-ID is accepted.
+  strict, none different). `go.mod` now needs `regexp2` and `go-lib-mbox2nntp`. One bug came along with the copy, now fixed:
+  `GetMessageID`'s strict mode tested the literal `"msgid"` for an `@`, so with
+  `-lax-msgid=false` no Message-ID was accepted (0/0 on `0.akita-inu.20140617.mbox.gz`,
+  now 1,465/1,467 as in lax mode).
 
 - **RESOLVED — the committed `mbox2nntp` binary** is no longer tracked, and `.gitignore`
   names `/mbox2nntp`.

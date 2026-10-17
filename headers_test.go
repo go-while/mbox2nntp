@@ -10,7 +10,9 @@ import (
 // (v0.0.0-20250520152009-98ae78251105) before the copy in headers.go
 // replaced it; the copy was compared with it on every header block in the
 // gna-clari, usenet-clari and akita-inu corpus as well (10,555,466
-// comparisons, lax and strict, none different).
+// comparisons, lax and strict, none different). The strict columns have
+// since changed: the original rejected every Message-ID in strict mode,
+// and now one in <> with an "@" and no space passes.
 func TestParseHeaderKeysAsOverview(t *testing.T) {
 	w := log.Writer()
 	log.SetOutput(io.Discard)
@@ -25,10 +27,10 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 	}{
 		{nil, "", false, "", false, 0},
 		{[]string{}, "", true, "", true, 0},
-		{[]string{"Message-ID: <a@b>"}, "<a@b>", true, "", false, 1},
-		{[]string{"Subject: x", "Message-ID: <a@b>", "Date: today"}, "<a@b>", true, "", false, 3},
-		{[]string{"Subject: x", "message-id: <a@b>"}, "<a@b>", true, "", false, 2},
-		{[]string{"Subject: x", "MESSAGE-ID:<a@b>"}, "<a@b>", true, "", false, 2},
+		{[]string{"Message-ID: <a@b>"}, "<a@b>", true, "<a@b>", true, 1},
+		{[]string{"Subject: x", "Message-ID: <a@b>", "Date: today"}, "<a@b>", true, "<a@b>", true, 3},
+		{[]string{"Subject: x", "message-id: <a@b>"}, "<a@b>", true, "<a@b>", true, 2},
+		{[]string{"Subject: x", "MESSAGE-ID:<a@b>"}, "<a@b>", true, "<a@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <a b@c>"}, "<a b@c>", true, "", false, 2},
 		{[]string{"Subject: x", "Message-ID: <a@b>#1/1"}, "<a@b>", true, "", false, 2},
 		{[]string{"Subject: x", "Message-ID: <a@b> (comment)"}, "<a@b>", true, "", false, 2},
@@ -38,10 +40,10 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 		{[]string{"Subject: x", "Message-ID: a@b"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID: <a@b"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID: "}, "", false, "", false, 0},
-		{[]string{"Subject: x", "Message-ID:", " <a@b>"}, "<a@b>", true, "", false, 2},
+		{[]string{"Subject: x", "Message-ID:", " <a@b>"}, "<a@b>", true, "<a@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <a@", " b>"}, "<a@ b>", true, "", false, 2},
 		{[]string{"Subject: x", "Message-ID: <a@b>", "Message-ID: <c@d>"}, "<a@b> <c@d>", true, "", false, 3},
-		{[]string{"Subject: a", "\tcontinued", "Message-ID: <a@b>", "Path: x"}, "<a@b>", true, "", false, 3},
+		{[]string{"Subject: a", "\tcontinued", "Message-ID: <a@b>", "Path: x"}, "<a@b>", true, "<a@b>", true, 3},
 		{[]string{"\tleading continuation", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "no colon", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", ":no key", "Message-ID: <a@b>"}, "", false, "", false, 0},
@@ -49,7 +51,7 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 		{[]string{"Subject: x", "", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID: <a@b>", ""}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID: <a@b>", "\tlast continuation"}, "", false, "", false, 0},
-		{[]string{"Subject: x", "Message-ID: <msgid@b>"}, "<msgid@b>", true, "", false, 2},
+		{[]string{"Subject: x", "Message-ID: <msgid@b>"}, "<msgid@b>", true, "<msgid@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <msgid>"}, "<msgid>", true, "", false, 2},
 	}
 	for _, c := range cases {
@@ -67,8 +69,8 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 		strictOK bool
 	}{
 		{"", "", false, "", false},
-		{"<a@b>", "<a@b>", true, "", false},
-		{" <a@b> ", "<a@b>", true, "", false},
+		{"<a@b>", "<a@b>", true, "<a@b>", true},
+		{" <a@b> ", "<a@b>", true, "<a@b>", true},
 		{"<a b>", "<a b>", true, "", false},
 		{"<a@b>#1/1", "<a@b>", true, "", false},
 		{"<a@b> (x)", "<a@b>", true, "", false},
@@ -76,7 +78,8 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 		{"<a@b>(UMass-2)", "<a@b>", true, "", false},
 		{"a@b", "", false, "", false},
 		{"<a@b", "", false, "", false},
-		{"<msgid@x>", "<msgid@x>", true, "", false},
+		{"<msgid@x>", "<msgid@x>", true, "<msgid@x>", true},
+		{"<ab>", "<ab>", true, "", false},
 	}
 	for _, c := range ids {
 		v1, e1 := GetMessageID(c.in, true)
