@@ -147,9 +147,28 @@ there is `uatexport` (`go build ./cmd/uatexport`):
 
 ```
 uatexport alt.pl.fan.gophi.usenet.xz                     # writes alt.pl.fan.gophi.mbox
+uatexport -gzip alt.pl.fan.gophi.usenet.xz               # writes alt.pl.fan.gophi.mbox.gz
+uatexport -gzip=9 -o /srv/mbox/gophi.mbox.gz alt.pl.fan.gophi.usenet.xz
 uatexport -format dir -o spool/ rec.games.rogue.usenet.7z
 uatexport -raw ...                                       # as the toolkit stores them
 ```
+
+`-gzip` compresses the mbox in-process (compress/gzip) at level 6; `-gzip=N` sets the
+level, 1 to 9. mbox2nntp reads the `.mbox.gz` as it reads any other. uatexport never
+replaces an existing output: it writes to a hidden temporary name next to it
+(`.NAME.*.tmp`) and renames it when complete, so a stopped run leaves no output that
+looks finished. Interrupted with Ctrl-C, it removes its temporary files.
+
+**Storage.** Measured on 7 groups (3 from nereid, 4 from archive.org, 56 MB of archives),
+per byte of `.usenet.xz`/`.7z`: the unpacked `.usenet` takes 1.9, the `.mbox` 2.4,
+the `.mbox.gz` 0.56 (level 1: 0.64, level 9: 0.54), and `.mbox.xz` 0.34. A `.mbox.gz`
+is smaller than the archive because the archive also holds the toolkit's search
+indexes. `-gzip` makes an export about 1.7 times slower than a plain one (`-gzip=9`: 2.5
+times). Reading the `.mbox.gz` with mbox2nntp is as fast as reading the archive.
+
+To feed a server you need no mbox at all: give mbox2nntp the archive. Keep the
+`.usenet.xz`/`.7z` files: they are the toolkit's own data, and an exported mbox is not the
+same, since mbox2nntp does not undo the `>From ` quoting of mboxrd.
 
 Other programs can read UAT archives with the package `github.com/go-while/mbox2nntp/uat`
 (standard library only, plus the zstd program); `uat/uattest` writes small archives for

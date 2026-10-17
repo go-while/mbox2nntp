@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
+	"flag"
 	"io"
 	"os"
 	"os/exec"
@@ -143,6 +145,115 @@ func TestExportXz(t *testing.T) {
 	}
 	if _, err := export(filepath.Join(dir, "x.mbox.xz"), options{format: "mbox"}); err == nil {
 		t.Error("a .xz that is not .usenet.xz: err = nil")
+	}
+}
+
+// -gzip writes GROUP.mbox.gz, the same mbox as without it, at any level.
+func TestExportGzip(t *testing.T) {
+	zstd := uattest.Zstd(t)
+	dir := t.TempDir()
+	in := uattest.Write(t, zstd, dir, "pl.test", "", msgs)
+	plain := filepath.Join(dir, "plain.mbox")
+	if _, err := export(in, options{format: "mbox", out: plain}); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := os.ReadFile(plain)
+
+	t.Chdir(dir)
+	for _, level := range []int{1, 6, 9} {
+		st, err := export(in, options{format: "mbox", gzip: level})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.out != "pl.test.mbox.gz" || st.n != len(msgs) {
+			t.Errorf("level %d: stats %+v", level, st)
+		}
+		f, err := os.Open(st.out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		zr, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := io.ReadAll(zr)
+		f.Close()
+		if err != nil {
+			t.Fatalf("level %d: %v", level, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("level %d: gunzipped\n%q\nwant\n%q", level, got, want)
+		}
+		if zr.Name != "pl.test.mbox" {
+			t.Errorf("level %d: gzip header name %q", level, zr.Name)
+		}
+		if _, err := export(in, options{format: "mbox", gzip: level}); err == nil {
+			t.Errorf("level %d: an existing mbox.gz was overwritten", level)
+		}
+		os.Remove(st.out)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, ".*.tmp")); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}
+
+// An export that fails half way leaves neither the output nor its
+// temporary file or directory.
+func TestExportFails(t *testing.T) {
+	uattest.Zstd(t)
+	dir := t.TempDir()
+	// one message of 5 bytes that are not zstd data
+	var zmeta [16]byte
+	zmeta[8], zmeta[12] = 5, 5
+	in := uattest.WriteRaw(t, filepath.Join(dir, "bad.usenet"), 3, map[string][]byte{
+		"name": []byte("pl.bad"), "zdata": []byte("hello"), "zmeta": zmeta[:], "zdict": []byte("dict"),
+	})
+	for _, o := range []options{
+		{format: "mbox", out: filepath.Join(dir, "bad.mbox")},
+		{format: "mbox", out: filepath.Join(dir, "bad.mbox.gz"), gzip: 6},
+		{format: "dir", out: filepath.Join(dir, "bad")},
+	} {
+		if _, err := export(in, o); err == nil {
+			t.Errorf("%s: err = nil", o.out)
+		}
+		entries, _ := os.ReadDir(dir)
+		if len(entries) != 1 {
+			var names []string
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("%s: left %q", o.out, names)
+		}
+	}
+}
+
+func TestGzipFlag(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{nil, 0},
+		{[]string{"-gzip"}, 6},
+		{[]string{"-gzip=1"}, 1},
+		{[]string{"-gzip=9"}, 9},
+		{[]string{"-gzip=true"}, 6},
+		{[]string{"-gzip=9", "-gzip=false"}, 0},
+	} {
+		level := 0
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.Var(gzipFlag{&level}, "gzip", "")
+		if err := fs.Parse(tc.args); err != nil || level != tc.want {
+			t.Errorf("%q: level %d, %v; want %d", tc.args, level, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"-gzip=0", "-gzip=10", "-gzip=fast"} {
+		level := 0
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		fs.Var(gzipFlag{&level}, "gzip", "")
+		if err := fs.Parse([]string{bad}); err == nil {
+			t.Errorf("%s: no error, level %d", bad, level)
+		}
 	}
 }
 
