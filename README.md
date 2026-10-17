@@ -2,21 +2,26 @@
 
 Feeds Usenet archives in mbox form to an NNTP server, one article at a time, with
 `IHAVE`. It was written to load the archive.org Usenet collections (`gna-clari`,
-`usenet-clari`, the `usenet-*` and `FULL-USENET-BACKUP-*` items) into INN2.
+`usenet-clari`, the `usenet-*` and `FULL-USENET-BACKUP-*` items) into INN2. It also reads
+the archives of the [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive)
+(see [UAT archives](#uat-archives)).
 
-Each run takes one input: an mbox, a compressed mbox, or a directory of article files.
+Each run takes one input: an mbox, a compressed mbox, a UAT archive, or a directory of
+article files.
 
 ## Build
 
 Runs on Linux, Windows and macOS, as one binary. `.gz` and `.zip` archives are unpacked
-in-process. `.7z` archives need the 7-Zip program, because Go's standard library has no 7z
-reader (see [7z archives](#7z-archives)).
+in-process. `.7z` archives need the 7-Zip program, and UAT archives the `zstd` program,
+because Go's standard library reads neither format (see [7z archives](#7z-archives) and
+[UAT archives](#uat-archives)).
 
 ```
 go build -o mbox2nntp .                                 # for this machine
 GOOS=windows GOARCH=amd64 go build -o mbox2nntp.exe .   # Windows
 GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
 GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
+go build -o uatexport ./cmd/uatexport                   # the UAT exporter
 ```
 
 Needs Go 1.27.1 or later. Apart from the Go standard library, the only dependency is the
@@ -36,6 +41,7 @@ mbox2nntp [flags] -dry-run INPUT
 | `NAME.mbox.gz` | gzip-compressed mbox, one stream or many concatenated members |
 | `NAME.mbox.zip` | zip archive holding `NAME.mbox` |
 | `NAME.mbox.7z` | 7z archive holding `NAME.mbox` |
+| `NAME.usenet` | a [UAT archive](#uat-archives), one newsgroup; also `NAME.usenet.xz` and `NAME.usenet.7z` |
 | `DIR` | a directory tree with one article per file, such as an INN spool |
 
 | flag | default | |
@@ -44,6 +50,8 @@ mbox2nntp [flags] -dry-run INPUT
 | `-workers N` | `1` | parallel connections |
 | `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked |
 | `-7z PATH` | `7z`, `7zz` or `7za` | the 7-Zip program for `.7z` inputs |
+| `-zstd PATH` | `zstd` | the zstd program for UAT archives |
+| `-xz PATH` | `xz`, else 7-Zip | the xz program for `.usenet.xz` inputs |
 | `-dry-run` | off | parse and rewrite articles, but connect to no server and send nothing; the input is never marked done |
 | `-keep-binary` | off | send yEnc (`=ybegin`) articles instead of dropping them |
 | `-dos2unix PATH` | none | run this `dos2unix` on each mbox first, as older versions always did; not needed, see below |
@@ -87,6 +95,59 @@ error.
 
 `.gz`, `.zip`, plain mbox and directory inputs need no other program.
 
+### UAT archives
+
+The [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive) (UAT) keeps one
+newsgroup per `GROUP.usenet` file. Two collections are published:
+
+- [usenet.nereid.pl](https://usenet.nereid.pl/): 333 Polish groups as `.usenet.xz`, 41 GB;
+- archive.org [`usenet-uat-pc-games`](https://archive.org/details/usenet-uat-pc-games):
+  39 groups, games and `alt.folklore.computers`, as `.usenet.7z`, 6.5 GB.
+
+Each message in the archive is compressed with zstd and a dictionary. mbox2nntp runs the
+`zstd` program once over all of them (`-zstd PATH`, else `zstd` in `PATH`):
+
+- **Linux:** the `zstd` package. **macOS:** `brew install zstd`.
+- **Windows:** `zstd.exe` from the [zstd releases](https://github.com/facebook/zstd/releases),
+  or `choco install zstandard`.
+
+`.usenet.xz` also needs `xz`, or 7-Zip; `.usenet.7z` needs 7-Zip.
+
+**The articles are not the originals.** The toolkit rewrote every message when it built the
+archive: it decoded the headers to UTF-8, kept only the text part of the body (attachments
+and HTML are gone) and converted it to UTF-8, and dropped `Content-Type` and
+`Content-Transfer-Encoding`. It also removed spam, duplicates, and articles not posted to
+the group. mbox2nntp makes them valid articles again:
+
+- `Content-Type: text/plain; charset=UTF-8` and `Content-Transfer-Encoding: 8bit` (`7bit`
+  for a plain ASCII body), and `MIME-Version: 1.0` where it is missing;
+- non-ASCII header text goes back into RFC 2047 encoded-words: whole runs of words in
+  `Subject:`, `Organization:` and other free-text fields, the display names in `From:`,
+  `Reply-To:` and other address fields;
+- `Message-ID`, `References`, `Newsgroups`, `Path`, `Date` and the other structured fields
+  are never changed. Header fields in plain ASCII are kept byte for byte.
+
+The `Done read` line counts the re-encoded fields, and names any field left with non-ASCII
+in it.
+
+**Feed UAT archives last.** Their articles keep their original Message-IDs. A server that
+already holds the original from another archive answers `435`, and keeps the original; a
+server that gets the UAT copy first keeps the rewritten one.
+
+To write a UAT archive out as an mbox file or as one file per article, for use elsewhere,
+there is `uatexport` (`go build ./cmd/uatexport`):
+
+```
+uatexport alt.pl.fan.gophi.usenet.xz                     # writes alt.pl.fan.gophi.mbox
+uatexport -format dir -o spool/ rec.games.rogue.usenet.7z
+uatexport -raw ...                                       # as the toolkit stores them
+```
+
+The mbox is mboxrd (`From ` body lines get a `>`), with a `From nobody DATE` line that
+mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
+to a server, give mbox2nntp the `.usenet` file: it does not un-escape `>From ` lines, and
+its directory mode reads files as dot-stuffed wire format.
+
 ### The old positional form
 
 The arguments used before the flags existed still work, with a deprecation note in the
@@ -107,6 +168,7 @@ When every article has been answered and none failed, the input is renamed to
 
 - For a plain `NAME.mbox` with an archive beside it (`NAME.mbox.gz`, `.zip` or `.7z`), the
   archive is renamed instead.
+- A UAT archive (`.usenet`, `.usenet.xz`, `.usenet.7z`) is renamed like an mbox.
 - The copy unpacked into `-tmpdir` is removed after the rename.
 - A directory input is never renamed.
 
@@ -118,7 +180,7 @@ come back as `435` and cost little.
 The process exits 0 when it finishes a run, whether or not the input was marked done; the
 `.done` rename is the signal. It exits 2 on a command-line error, and 1 on a fatal
 error (an input that cannot be opened or unpacked, a `-dos2unix` that cannot be found, no
-7-Zip for a `.7z` input).
+7-Zip for a `.7z` input, no zstd for a UAT archive).
 
 ## What is sent
 
@@ -201,8 +263,9 @@ go test ./...
 ```
 
 The tests need no network, server or corpus. They cover article corruption on the wire,
-connection failures against a scripted fake server, header rewriting, archive handling and
-the command line. GitHub Actions runs them on Linux, Windows and macOS
+connection failures against a scripted fake server, header rewriting, archive handling, UAT
+archives and their header encoding, and the command line. The 7z, xz and UAT tests need
+7-Zip, xz and zstd, and skip without them. GitHub Actions runs them on Linux, Windows and macOS
 (`.github/workflows/test.yml`).
 
 `review-this-messy-codebase-cheeky-corbato.md` is the code review this version came out

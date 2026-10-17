@@ -7,73 +7,13 @@ import (
 	"mime"
 	"net/mail"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/go-while/mbox2nntp/internal/uattest"
 )
-
-func needZstd(t *testing.T) string {
-	t.Helper()
-	path, err := exec.LookPath("zstd")
-	if err != nil {
-		if os.Getenv("CI") != "" {
-			t.Fatal("zstd not found") // the workflow installs it
-		}
-		t.Skip("zstd not found")
-	}
-	return path
-}
-
-// writePackage writes a version 3 .usenet file holding msgs, compressed
-// one by one with zstd against dict, the way the toolkit stores them. A
-// plain file serves as a zstd dictionary as well as a trained one.
-func writePackage(t *testing.T, zstd, name, desc string, msgs []string) string {
-	t.Helper()
-	dir := t.TempDir()
-	dict := filepath.Join(dir, "dict")
-	if err := os.WriteFile(dict, []byte("Path: Newsgroups: Subject: Message-ID: Date: From: References: "), 0644); err != nil {
-		t.Fatal(err)
-	}
-	var zdata, zmeta bytes.Buffer
-	for _, m := range msgs {
-		cmd := exec.Command(zstd, "-q", "-c", "-D", dict)
-		cmd.Stdin = strings.NewReader(m)
-		c, err := cmd.Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		binary.Write(&zmeta, binary.LittleEndian, uint64(zdata.Len()))
-		binary.Write(&zmeta, binary.LittleEndian, uint32(len(m)))
-		binary.Write(&zmeta, binary.LittleEndian, uint32(len(c)))
-		zdata.Write(c)
-	}
-	d, _ := os.ReadFile(dict)
-	contents := map[string][]byte{"name": []byte(name), "desc_short": []byte(desc), "zdata": zdata.Bytes(), "zmeta": zmeta.Bytes(), "zdict": d}
-	return writeRaw(t, dir, 3, contents)
-}
-
-func writeRaw(t *testing.T, dir string, version byte, contents map[string][]byte) string {
-	t.Helper()
-	var b bytes.Buffer
-	b.WriteString(magic)
-	b.WriteByte(version)
-	for _, f := range packageFiles {
-		binary.Write(&b, binary.LittleEndian, uint64(len(contents[f])))
-	}
-	for _, f := range packageFiles {
-		b.Write(contents[f])
-		for b.Len()%8 != 0 {
-			b.WriteByte(0)
-		}
-	}
-	path := filepath.Join(dir, "x.usenet")
-	if err := os.WriteFile(path, b.Bytes(), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
 
 var testMsgs = []string{
 	"Path: a!b\nNewsgroups: pl.test\nSubject: one\nMessage-ID: <1@x>\n\nfirst\n",
@@ -83,8 +23,8 @@ var testMsgs = []string{
 }
 
 func TestOpenAndEach(t *testing.T) {
-	zstd := needZstd(t)
-	path := writePackage(t, zstd, "pl.test\n", "a test group\r\n", testMsgs)
+	zstd := uattest.Zstd(t)
+	path := uattest.Write(t, zstd, t.TempDir(), "pl.test\n", "a test group\r\n", testMsgs)
 	p, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -117,6 +57,12 @@ func TestOpenAndEach(t *testing.T) {
 	}
 }
 
+func TestUattestMatchesFormat(t *testing.T) {
+	if !reflect.DeepEqual(uattest.Files, packageFiles) {
+		t.Error("internal/uattest.Files and packageFiles differ")
+	}
+}
+
 func TestOpenRejects(t *testing.T) {
 	dir := t.TempDir()
 	meta := func(recs ...[3]uint64) []byte {
@@ -135,11 +81,11 @@ func TestOpenRejects(t *testing.T) {
 	cases := map[string]string{
 		"not an archive":   notUAT,
 		"truncated":        truncated,
-		"newer version":    writeRaw(t, t.TempDir(), 4, nil),
-		"zmeta not 16s":    writeRaw(t, t.TempDir(), 3, map[string][]byte{"zmeta": make([]byte, 15)}),
-		"out of order":     writeRaw(t, t.TempDir(), 3, map[string][]byte{"zdata": make([]byte, 20), "zmeta": meta([3]uint64{10, 5, 10}, [3]uint64{0, 5, 10})}),
-		"zdata too long":   writeRaw(t, t.TempDir(), 3, map[string][]byte{"zdata": make([]byte, 21), "zmeta": meta([3]uint64{0, 5, 10}, [3]uint64{10, 5, 10})}),
-		"zdata too short":  writeRaw(t, t.TempDir(), 3, map[string][]byte{"zdata": make([]byte, 19), "zmeta": meta([3]uint64{0, 5, 10}, [3]uint64{10, 5, 10})}),
+		"newer version":    uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 4, nil),
+		"zmeta not 16s":    uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 3, map[string][]byte{"zmeta": make([]byte, 15)}),
+		"out of order":     uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 3, map[string][]byte{"zdata": make([]byte, 20), "zmeta": meta([3]uint64{10, 5, 10}, [3]uint64{0, 5, 10})}),
+		"zdata too long":   uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 3, map[string][]byte{"zdata": make([]byte, 21), "zmeta": meta([3]uint64{0, 5, 10}, [3]uint64{10, 5, 10})}),
+		"zdata too short":  uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 3, map[string][]byte{"zdata": make([]byte, 19), "zmeta": meta([3]uint64{0, 5, 10}, [3]uint64{10, 5, 10})}),
 		"missing the file": filepath.Join(dir, "no-such.usenet"),
 	}
 	for name, path := range cases {
@@ -149,7 +95,7 @@ func TestOpenRejects(t *testing.T) {
 		}
 	}
 	// an empty archive is valid
-	p, err := Open(writeRaw(t, t.TempDir(), 3, map[string][]byte{"name": []byte("pl.empty")}))
+	p, err := Open(uattest.WriteRaw(t, filepath.Join(t.TempDir(), "x.usenet"), 3, map[string][]byte{"name": []byte("pl.empty")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,8 +108,8 @@ func TestOpenRejects(t *testing.T) {
 // A message whose stored size disagrees with what zstd puts out is an
 // error, not a shifted split.
 func TestEachSizeMismatch(t *testing.T) {
-	zstd := needZstd(t)
-	path := writePackage(t, zstd, "pl.test", "", testMsgs[:2])
+	zstd := uattest.Zstd(t)
+	path := uattest.Write(t, zstd, t.TempDir(), "pl.test", "", testMsgs[:2])
 	b, _ := os.ReadFile(path)
 	// zmeta is the 20th file; its first record's size field is at +8
 	off := int64(len(magic) + 1 + 8*len(packageFiles))
