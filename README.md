@@ -143,6 +143,10 @@ uatexport -format dir -o spool/ rec.games.rogue.usenet.7z
 uatexport -raw ...                                       # as the toolkit stores them
 ```
 
+Other programs can read UAT archives with the package `github.com/go-while/mbox2nntp/uat`
+(standard library only, plus the zstd program); `uat/uattest` writes small archives for
+their tests.
+
 The mbox is mboxrd (`From ` body lines get a `>`), with a `From nobody DATE` line that
 mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
 to a server, give mbox2nntp the `.usenet` file, not the exported mbox: it does not un-escape

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-while/mbox2nntp/internal/uattest"
+	"github.com/go-while/mbox2nntp/uat/uattest"
 )
 
 var testMsgs = []string{
@@ -59,7 +59,7 @@ func TestOpenAndEach(t *testing.T) {
 
 func TestUattestMatchesFormat(t *testing.T) {
 	if !reflect.DeepEqual(uattest.Files, packageFiles) {
-		t.Error("internal/uattest.Files and packageFiles differ")
+		t.Error("uattest.Files and packageFiles differ")
 	}
 }
 

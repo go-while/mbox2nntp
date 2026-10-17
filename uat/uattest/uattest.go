@@ -1,6 +1,8 @@
-// Package uattest writes small UAT .usenet files for tests: the messages
-// and the files package uat reads, the other databases left empty. The
-// toolkit's own programs cannot use them.
+// Package uattest writes small UAT .usenet files for tests of code that
+// uses package uat, as net/http/httptest does for net/http. A file holds
+// the messages and what uat reads, with the toolkit's other databases left
+// empty, so the toolkit's own programs cannot use it. Writing one needs
+// the zstd program.
 package uattest
 
 import (
@@ -23,7 +25,7 @@ var Files = []string{
 
 // Zstd returns the zstd program, skipping the test without one, or failing
 // it under CI, whose workflow installs zstd.
-func Zstd(t *testing.T) string {
+func Zstd(t testing.TB) string {
 	t.Helper()
 	path, err := exec.LookPath("zstd")
 	if err != nil {
@@ -39,7 +41,7 @@ func Zstd(t *testing.T) string {
 // path. Each message is compressed on its own against one dictionary, as
 // the toolkit stores them; a plain file serves as a zstd dictionary as
 // well as a trained one.
-func Write(t *testing.T, zstd, dir, name, desc string, msgs []string) string {
+func Write(t testing.TB, zstd, dir, name, desc string, msgs []string) string {
 	t.Helper()
 	dict := filepath.Join(dir, "dict")
 	if err := os.WriteFile(dict, []byte("Path: Newsgroups: Subject: Message-ID: Date: From: References: "), 0644); err != nil {
@@ -67,7 +69,7 @@ func Write(t *testing.T, zstd, dir, name, desc string, msgs []string) string {
 
 // WriteRaw writes a package with the given version and file contents to
 // path; files not in contents are empty.
-func WriteRaw(t *testing.T, path string, version byte, contents map[string][]byte) string {
+func WriteRaw(t testing.TB, path string, version byte, contents map[string][]byte) string {
 	t.Helper()
 	var b bytes.Buffer
 	b.WriteString("\x00Usenet")

@@ -11,8 +11,8 @@ import (
 	"testing"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
-	"github.com/go-while/mbox2nntp/internal/uattest"
 	"github.com/go-while/mbox2nntp/uat"
+	"github.com/go-while/mbox2nntp/uat/uattest"
 )
 
 var msgs = []string{
