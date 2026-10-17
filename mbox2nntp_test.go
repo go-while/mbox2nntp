@@ -19,6 +19,7 @@ import (
 	"time"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/unpack"
 )
 
 /*
@@ -712,7 +713,7 @@ func TestGunzipToConcatenatedMembers(t *testing.T) {
 	}
 }
 
-// unzipTo and un7zTo extract only the entry named like dst, overwriting a
+// unzipTo and unpack.Un7zTo extract only the entry named like dst, overwriting a
 // file left by an earlier run, and fail when the archive lacks it.
 func TestUnzipTo(t *testing.T) {
 	dir := t.TempDir()
@@ -737,7 +738,7 @@ func TestUnzipTo(t *testing.T) {
 }
 
 func TestUn7zTo(t *testing.T) {
-	if _, err := find7z(); err != nil {
+	if _, err := unpack.Find7z(); err != nil {
 		if os.Getenv("CI") != "" {
 			t.Fatal(err) // the workflow installs 7-Zip
 		}
@@ -753,7 +754,7 @@ func TestUn7zTo(t *testing.T) {
 	if err := os.WriteFile(archive, data, 0644); err != nil {
 		t.Fatal(err)
 	}
-	testExtractor(t, un7zTo, archive, "From nobody Thu Dec  8 12:55:04 2016\nSubject: 7z\nMessage-ID: <7z@test>\n\nbody\n")
+	testExtractor(t, unpack.Un7zTo, archive, "From nobody Thu Dec  8 12:55:04 2016\nSubject: 7z\nMessage-ID: <7z@test>\n\nbody\n")
 
 	// A damaged archive is an error, not a short mbox.
 	bad := append([]byte(nil), data...)
@@ -761,25 +762,15 @@ func TestUn7zTo(t *testing.T) {
 	if err := os.WriteFile(archive, bad, 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
+	if err := unpack.Un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
 		t.Error("damaged archive: err = nil")
 	}
 
-	saved := SEVENZIP
-	t.Cleanup(func() { SEVENZIP = saved })
-	SEVENZIP = "no-such-7z"
-	if err := un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
+	saved := unpack.SevenZip
+	t.Cleanup(func() { unpack.SevenZip = saved })
+	unpack.SevenZip = "no-such-7z"
+	if err := unpack.Un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
 		t.Error("-7z no-such-7z: err = nil")
-	}
-}
-
-func TestHas7zEntry(t *testing.T) {
-	listing := "\n7-Zip 25.01\n\nListing archive: x.mbox.7z\n\n--\nPath = x.mbox.7z\nType = 7z\n\n" +
-		"----------\nPath = x.mbox\nSize = 5\n\nPath = sub/y.mbox\r\nSize = 5\r\n"
-	for name, want := range map[string]bool{"x.mbox": true, "x.mbox.7z": false, "y.mbox": false, "sub/y.mbox": true, "": false} {
-		if got := has7zEntry(listing, name); got != want {
-			t.Errorf("has7zEntry(%q) = %t, want %t", name, got, want)
-		}
 	}
 }
 

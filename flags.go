@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/mbox2nntp/internal/unpack"
 )
 
 // options holds the command line. apply copies it into the package globals
@@ -150,7 +152,7 @@ func (o *options) apply() {
 	DROPBINARY = !o.keepBinary
 	NODOS2UNIX = o.noDos2unix || fileExists(".nodos2unix")
 	DOS2UNIX = o.dos2unix
-	SEVENZIP = o.sevenZip
+	unpack.SevenZip = o.sevenZip
 	NNTP_TIMEOUT = o.timeout
 	MAX_TRIES = o.maxTries
 	PREHASH_MODE = o.prehash

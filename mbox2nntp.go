@@ -20,7 +20,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	//"regexp"
 	"sort"
@@ -31,6 +30,7 @@ import (
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	//"github.com/edsrzf/mmap-go"
 	"github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/unpack"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
 	//"nntp/data/overview"
 )
@@ -411,10 +411,10 @@ func extractedPath(archive, ext string) string {
 	return filepath.Join(tmpdir, strings.TrimSuffix(filepath.Base(archive), ext))
 }
 
-// unpack runs fn to extract archive to dst, and exits on failure. The
+// unpackOrExit runs fn to extract archive to dst, and exits on failure. The
 // extractors overwrite dst: a file left by an interrupted run may be
 // truncated, and must not be imported in place of the real one.
-func unpack(kind string, fn func(archive, dst string) error, archive, dst string) {
+func unpackOrExit(kind string, fn func(archive, dst string) error, archive, dst string) {
 	log.Printf("%s %s to %s", kind, archive, dst)
 	if err := fn(archive, dst); err != nil {
 		log.Printf("%s failed mboxfile='%s' err='%v' =exit(1)", kind, archive, err)
@@ -437,7 +437,7 @@ func gunzipTo(archive, dst string) error {
 	if err != nil {
 		return err
 	}
-	return writeTo(dst, zr)
+	return unpack.WriteTo(dst, zr)
 }
 
 // unzipTo extracts the entry named like dst from a zip archive. It replaces
@@ -459,102 +459,9 @@ func unzipTo(archive, dst string) error {
 			return err
 		}
 		defer rc.Close()
-		return writeTo(dst, rc) // the zip reader checks the CRC at the end
+		return unpack.WriteTo(dst, rc) // the zip reader checks the CRC at the end
 	}
 	return fmt.Errorf("no entry '%s' in the archive", name)
-}
-
-// SEVENZIP is the 7-Zip program that unpacks .7z inputs, set with -7z.
-// Empty means the first of 7z, 7zz and 7za found in PATH, or on Windows
-// 7-Zip's install directory. Go's standard library has no 7z reader, and
-// this module takes no third-party code.
-var SEVENZIP = ""
-
-func find7z() (string, error) {
-	if SEVENZIP != "" {
-		return exec.LookPath(SEVENZIP)
-	}
-	names := []string{"7z", "7zz", "7za"}
-	if runtime.GOOS == "windows" {
-		// The 7-Zip installer does not add itself to PATH.
-		names = append(names, filepath.Join(os.Getenv("ProgramFiles"), "7-Zip", "7z.exe"))
-	}
-	for _, name := range names {
-		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
-		}
-	}
-	return "", errors.New("no 7z, 7zz or 7za in PATH: install 7-Zip, or give its path with -7z")
-}
-
-// un7zTo is unzipTo for 7z archives. The FULL-USENET-BACKUP items hold just
-// NAME.mbox, LZMA2-compressed. It lists the archive first, because 7z
-// succeeds and writes nothing when asked for a name that is not there, then
-// streams that one entry to dst. "--" ends the switches, so an archive
-// named "-x" or "@x" is a file name, and -spd turns off wildcards in the
-// entry name.
-func un7zTo(archive, dst string) error {
-	prog, err := find7z()
-	if err != nil {
-		return err
-	}
-	name := filepath.Base(dst)
-	var stderr bytes.Buffer
-	list := exec.Command(prog, "l", "-slt", "-spd", "--", archive)
-	list.Stderr = &stderr
-	out, err := list.Output()
-	if err != nil {
-		return fmt.Errorf("%s l: %v: %s", prog, err, strings.TrimSpace(stderr.String()))
-	}
-	if !has7zEntry(string(out), name) {
-		return fmt.Errorf("no entry '%s' in the archive", name)
-	}
-	stderr.Reset()
-	extract := exec.Command(prog, "e", "-so", "-bd", "-spd", "--", archive, name)
-	extract.Stderr = &stderr
-	stdout, err := extract.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	if err := extract.Start(); err != nil {
-		return err
-	}
-	werr := writeTo(dst, stdout)
-	if werr != nil {
-		extract.Process.Kill() // it would block on a full pipe
-	}
-	if err := extract.Wait(); err != nil { // 7z checks the CRC and exits 2 on a mismatch
-		return fmt.Errorf("%s e: %v: %s", prog, err, strings.TrimSpace(stderr.String()))
-	}
-	return werr
-}
-
-// has7zEntry reports whether the output of "7z l -slt" lists a top-level
-// entry called name. Entries follow the "----------" line, one
-// "Path = ..." line each; the "Path = " lines above it are the archive's.
-func has7zEntry(listing, name string) bool {
-	entries := false
-	for _, line := range strings.Split(listing, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "----------" {
-			entries = true
-		} else if entries && line == "Path = "+name {
-			return true
-		}
-	}
-	return false
-}
-
-func writeTo(dst string, r io.Reader) error {
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, r); err != nil {
-		out.Close()
-		return err
-	}
-	return out.Close()
 }
 
 func rmmbox(mboxfile string) {
@@ -1034,7 +941,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	} else if is_zip {
 		// mbox is zip
 		mboxfiletrim = extractedPath(mboxfile, ".zip")
-		unpack("unzip", unzipTo, mboxfile, mboxfiletrim)
+		unpackOrExit("unzip", unzipTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -1046,7 +953,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	} else if is_gzp {
 		// mbox is gzip
 		mboxfiletrim = extractedPath(mboxfile, ".gz")
-		unpack("gunzip", gunzipTo, mboxfile, mboxfiletrim)
+		unpackOrExit("gunzip", gunzipTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("gunzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
@@ -1057,7 +964,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 	} else if is_zip7 {
 		// mbox is 7z
 		mboxfiletrim = extractedPath(mboxfile, ".7z")
-		unpack("un7z", un7zTo, mboxfile, mboxfiletrim)
+		unpackOrExit("un7z", unpack.Un7zTo, mboxfile, mboxfiletrim)
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped 7z '%s' but not found '%s'", mboxfile, mboxfiletrim)
