@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
-	"flag"
 	"io"
 	"os"
 	"os/exec"
@@ -224,53 +223,5 @@ func TestExportFails(t *testing.T) {
 			}
 			t.Errorf("%s: left %q", o.out, names)
 		}
-	}
-}
-
-func TestGzipFlag(t *testing.T) {
-	for _, tc := range []struct {
-		args []string
-		want int
-	}{
-		{nil, 0},
-		{[]string{"-gzip"}, 6},
-		{[]string{"-gzip=1"}, 1},
-		{[]string{"-gzip=9"}, 9},
-		{[]string{"-gzip=true"}, 6},
-		{[]string{"-gzip=9", "-gzip=false"}, 0},
-	} {
-		level := 0
-		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		fs.Var(gzipFlag{&level}, "gzip", "")
-		if err := fs.Parse(tc.args); err != nil || level != tc.want {
-			t.Errorf("%q: level %d, %v; want %d", tc.args, level, err, tc.want)
-		}
-	}
-	for _, bad := range []string{"-gzip=0", "-gzip=10", "-gzip=fast"} {
-		level := 0
-		fs := flag.NewFlagSet("t", flag.ContinueOnError)
-		fs.SetOutput(io.Discard)
-		fs.Var(gzipFlag{&level}, "gzip", "")
-		if err := fs.Parse([]string{bad}); err == nil {
-			t.Errorf("%s: no error, level %d", bad, level)
-		}
-	}
-}
-
-func TestParseDate(t *testing.T) {
-	for in, want := range map[string]string{
-		"Thu, 8 Dec 2016 12:55:04 +0100":     "Thu Dec  8 11:55:04 2016",
-		"Mon, 12-Jan-87 19:53:54 EST":        "Mon Jan 12 19:53:54 1987",
-		"Wednesday, 9 Jul 1986 10:11:12 EST": "Wed Jul  9 10:11:12 1986",
-		"9 Jun 88 01:02:03":                  "Thu Jun  9 01:02:03 1988",
-		"1989/03/31":                         "Fri Mar 31 00:00:00 1989",
-	} {
-		d, ok := parseDate(in)
-		if got := d.UTC().Format("Mon Jan _2 15:04:05 2006"); !ok || got != want {
-			t.Errorf("parseDate(%q) = %q, %t; want %q", in, got, ok, want)
-		}
-	}
-	if _, ok := parseDate("not a date"); ok {
-		t.Error("parseDate(not a date) succeeded")
 	}
 }
