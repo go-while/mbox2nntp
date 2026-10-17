@@ -102,3 +102,20 @@ func TestParseDate(t *testing.T) {
 		t.Error("ParseDate(not a date) succeeded")
 	}
 }
+
+func TestFromDate(t *testing.T) {
+	for _, tc := range []struct {
+		head []string
+		want string
+	}{
+		{[]string{"Subject: x", "Date: Thu, 8 Dec 2016 12:55:04 +0100"}, "Thu Dec  8 11:55:04 2016"},
+		{[]string{"date:Thu, 8 Dec 2016 12:55:04 +0100"}, "Thu Dec  8 11:55:04 2016"},
+		{[]string{"Date:", " Thu, 8 Dec 2016", "\t12:55:04 +0100"}, "Thu Dec  8 11:55:04 2016"}, // folded
+		{[]string{"Date: soon"}, "Thu Jan  1 00:00:00 1970"},
+		{[]string{"Subject: no date"}, "Thu Jan  1 00:00:00 1970"},
+	} {
+		if got := FromDate(tc.head); got != tc.want {
+			t.Errorf("FromDate(%q) = %q, want %q", tc.head, got, tc.want)
+		}
+	}
+}

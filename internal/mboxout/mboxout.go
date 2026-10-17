@@ -219,7 +219,7 @@ func IsFromLine(l string) bool {
 func FromDate(head []string) string {
 	t := time.Unix(0, 0)
 	for i, l := range head {
-		if len(l) > 5 && strings.EqualFold(l[:5], "date:") {
+		if len(l) >= 5 && strings.EqualFold(l[:5], "date:") {
 			v := l[5:]
 			for _, c := range head[i+1:] {
 				if c == "" || (c[0] != ' ' && c[0] != '\t') {
@@ -227,7 +227,8 @@ func FromDate(head []string) string {
 				}
 				v += c
 			}
-			if d, ok := ParseDate(strings.TrimSpace(v)); ok {
+			// unfolded, with each run of spaces and tabs one space
+			if d, ok := ParseDate(strings.Join(strings.Fields(v), " ")); ok {
 				t = d
 			}
 			break
