@@ -564,20 +564,11 @@ func read_file(file_path string) string {
 
 	//log.Printf(" -> read %d bytes fp='%s'", len(lines), filepath)
 
-	// the terminator is a line containing only '.', so testing the last byte
-	// drops every article whose final line merely ends in a period.
-	if !bytes.HasSuffix(lines, []byte("\n.")) && !bytes.Equal(lines, []byte(".")) {
-		lines = append(lines, "\r\n."...)
-		//log.Printf(" -> append '.' = %d bytes", len(lines))
-	}
-
 	//var headb []byte
 	var header []string
 	var body []string
 
-	r1 := textproto.NewReader(bufio.NewReader(bytes.NewReader(lines)))
-	msglines, err1 := r1.ReadDotLines()
-	r1 = nil
+	msglines, err1 := articleLines(lines)
 	if err1 != nil {
 		log.Printf("ERROR read_file(%s) ReadDotLines err1='%v'", file_path, err1)
 		return ""
@@ -744,6 +735,24 @@ func read_file(file_path string) string {
 	worker_channel <- &ArticleItem{msgid: msgid, head: header, body: body}
 	return msgid
 } // end read_file
+
+// articleLines splits an article file into lines without line endings.
+// A file whose last line is a lone "." is in wire format, as INN stores
+// articles with wireformat or in timehash: dot-stuffed and terminated, so
+// it is dot-decoded. Any other file is a plain article and is taken as it
+// is. All files used to be dot-decoded, which ended a plain article at a
+// body line holding only "." and took a dot off every line starting "..".
+func articleLines(data []byte) ([]string, error) {
+	last := bytes.TrimSuffix(bytes.TrimSuffix(data, []byte("\n")), []byte("\r"))
+	if bytes.Equal(last, []byte(".")) || bytes.HasSuffix(last, []byte("\n.")) {
+		return textproto.NewReader(bufio.NewReader(bytes.NewReader(data))).ReadDotLines()
+	}
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	for i, l := range lines {
+		lines[i] = strings.TrimSuffix(l, "\r")
+	}
+	return lines, nil
+}
 
 func body_remove_finalemptylines(body []string) []string {
 	//oldlen := len(body)

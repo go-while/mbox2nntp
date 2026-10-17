@@ -42,7 +42,7 @@ mbox2nntp [flags] -dry-run INPUT
 | `NAME.mbox.zip` | zip archive holding `NAME.mbox` |
 | `NAME.mbox.7z` | 7z archive holding `NAME.mbox` |
 | `NAME.usenet` | a [UAT archive](#uat-archives), one newsgroup; also `NAME.usenet.xz` and `NAME.usenet.7z` |
-| `DIR` | a directory tree with one article per file, such as an INN spool |
+| `DIR` | a directory tree with one article per file, such as an INN spool; plain articles, or wire format (dot-stuffed, ending in a `.` line) |
 
 | flag | default | |
 |---|---|---|
@@ -145,8 +145,8 @@ uatexport -raw ...                                       # as the toolkit stores
 
 The mbox is mboxrd (`From ` body lines get a `>`), with a `From nobody DATE` line that
 mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
-to a server, give mbox2nntp the `.usenet` file: it does not un-escape `>From ` lines, and
-its directory mode reads files as dot-stuffed wire format.
+to a server, give mbox2nntp the `.usenet` file, not the exported mbox: it does not un-escape
+`>From ` lines. An exported directory works as a `DIR` input.
 
 ### The old positional form
 

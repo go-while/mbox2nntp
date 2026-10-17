@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"strings"
@@ -170,6 +171,48 @@ func TestReadFileTrailingPeriod(t *testing.T) {
 	for i := range want {
 		if item.body[i] != want[i] {
 			t.Errorf("A2: body[%d]=%q want %q", i, item.body[i], want[i])
+		}
+	}
+}
+
+// Directory mode read every file as dot-stuffed wire format, so in a plain
+// article a body line holding only "." ended the article and "..x" lost a
+// dot. A plain file is now read as it is; a file in wire format (INN's
+// wireformat spool, timehash), which ends in a lone "." line, is still
+// dot-decoded.
+func TestReadFileDotLines(t *testing.T) {
+	const head = "From: someone@example.invalid\n" +
+		"Subject: dots\n" +
+		"Date: Mon, 30 Jun 2003 23:33:23 GMT\n" +
+		"Message-ID: <dots@test>\n" +
+		"\n"
+	plainBody := []string{"", ".", "..two dots", ".one dot", "last"}
+	cases := []struct {
+		name, file string
+		want       []string
+	}{
+		{"plain, LF", head + strings.Join(plainBody, "\n") + "\n", plainBody},
+		{"plain, CRLF", strings.ReplaceAll(head+strings.Join(plainBody, "\n")+"\n", "\n", "\r\n"), plainBody},
+		{"plain, no final newline", head + strings.Join(plainBody, "\n"), plainBody},
+		{"wire format, CRLF", strings.ReplaceAll(head+"\n..\n...two dots\n..one dot\nlast\n.\n", "\n", "\r\n"), plainBody},
+		{"wire format, LF", head + "\n..\n...two dots\n..one dot\nlast\n.\n", plainBody},
+		{"wire format, no newline after the dot", head + "\n..\n...two dots\n..one dot\nlast\n.", plainBody},
+	}
+	for _, c := range cases {
+		globalBools.V = make(map[string]bool)
+		globalCounter = GlobalCounter{v: make(map[string]int)}
+		worker_channel = make(chan *ArticleItem, 8)
+		fp := filepath.Join(t.TempDir(), "1")
+		if err := os.WriteFile(fp, []byte(c.file), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if msgid := read_file(fp); msgid != "<dots@test>" {
+			t.Errorf("%s: read_file = %q", c.name, msgid)
+			continue
+		}
+		item := <-worker_channel
+		if !reflect.DeepEqual(item.body, c.want) {
+			t.Errorf("%s: body %q\nwant %q", c.name, item.body, c.want)
 		}
 	}
 }

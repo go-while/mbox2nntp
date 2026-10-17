@@ -811,6 +811,14 @@ against a real INN.
   rename and the tmpdir cleanup would have failed after every article had been sent; it
   is now closed first. The `find | sort -V` comparison tests skip without GNU sort, and
   `.github/workflows/test.yml` runs the tests on all three systems.
+- **RESOLVED — directory mode dot-decoded plain articles.** `read_file` ran every file
+  through `textproto.ReadDotLines`, appending a terminator when there was none. In a plain
+  article (tradspool without wireformat, slrnpull, an export) a body line holding only `.`
+  ended the article, usually as "rxbb=0" and dropped, and every line starting `..` lost a
+  dot. Found by exporting UAT `alt.pl.fan.myszka` to a directory: 1 of 2,127 articles was
+  lost. `articleLines` now dot-decodes only a file whose last line is a lone `.` (wire
+  format: INN wireformat or timehash), and takes any other file as it is.
+  `TestReadFileDotLines` covers plain and wire format, LF and CRLF.
 - **RESOLVED — `DROPBINARY` is not honoured on the directory path**: `mbox2nntp.go:553` drops `=ybegin`
   unconditionally, while `mbox2nntp.go:1170` respects the flag. `read_file` now checks
   `DROPBINARY` too; `TestReadFileHonoursDropBinary` covers both settings.
