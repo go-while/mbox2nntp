@@ -1,0 +1,3 @@
+# UAT archives (Usenet Archive Toolkit, https://github.com/wolfpld/usenetarchive)
+# Archive of polish usenet: https://usenet.nereid.pl/
+{"identifier": "usenet-uat-pc-games"} # PC games usenet archive https://archive.org/details/usenet-uat-pc-games
