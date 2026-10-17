@@ -9,6 +9,14 @@ the archives of the [Usenet Archive Toolkit](https://github.com/wolfpld/usenetar
 Each run takes one input: an mbox, a compressed mbox, a UAT archive, or a directory of
 article files.
 
+## Download
+
+[Releases](https://github.com/go-while/mbox2nntp/releases) have ready-built `mbox2nntp` and
+`uatexport` for Linux, Windows, macOS (amd64, arm64) and FreeBSD (amd64), with a SHA-256
+checksum file. `mbox2nntp -version` prints which one you have. A release is built by
+`.github/workflows/release.yml` when a `v*` tag is pushed, or by running that workflow from
+the Actions tab with a version to tag.
+
 ## Build
 
 Runs on Linux, Windows and macOS, as one binary. `.gz` and `.zip` archives are unpacked
