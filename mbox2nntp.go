@@ -31,6 +31,7 @@ import (
 	//"github.com/edsrzf/mmap-go"
 	"github.com/go-while/go-lib-mbox2nntp"
 	"github.com/go-while/mbox2nntp/internal/unpack"
+	"github.com/go-while/mbox2nntp/internal/version"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
 	//"nntp/data/overview"
 )
@@ -792,9 +793,14 @@ func main() {
 		log.Printf("ERROR: %v (see -h)", err)
 		os.Exit(2)
 	}
+	if opts.version {
+		fmt.Println(version.String("mbox2nntp"))
+		os.Exit(0)
+	}
 	if opts.legacy {
 		log.Printf("NOTE: positional arguments are deprecated, use flags (see -h)")
 	}
+	log.Printf("%s", version.String("mbox2nntp"))
 	opts.apply()
 	mboxfile := opts.input
 	if !fileExists(mboxfile) && !dirExists(mboxfile) {

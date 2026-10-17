@@ -25,6 +25,14 @@ func TestParseArgsFlags(t *testing.T) {
 	}
 }
 
+// -version needs no INPUT and no server.
+func TestParseArgsVersion(t *testing.T) {
+	o, err := parseArgs("m", []string{"-version"}, &bytes.Buffer{})
+	if err != nil || !o.version {
+		t.Fatalf("parseArgs(-version) = %+v, %v", o, err)
+	}
+}
+
 func TestParseArgsDefaults(t *testing.T) {
 	o, err := parseArgs("m", []string{"-server", "news:119", "a.mbox"}, &bytes.Buffer{})
 	if err != nil {

@@ -32,6 +32,7 @@ type options struct {
 	prehash    bool
 	laxMsgid   bool
 	legacy     bool // given as positional arguments
+	version    bool // -version: print it and exit
 }
 
 const usageHead = `Usage: %[1]s [flags] -server HOST:PORT INPUT
@@ -87,12 +88,16 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.IntVar(&o.maxTries, "max-tries", o.maxTries, "tries per article after 436 or a lost connection, then it counts as an error")
 	fs.BoolVar(&o.prehash, "prehash", o.prehash, "send \"IHAVE <msgid> <sha256>\"; -prehash=false sends plain \"IHAVE <msgid>\"")
 	fs.BoolVar(&o.laxMsgid, "lax-msgid", o.laxMsgid, "accept loosely formed Message-IDs")
+	fs.BoolVar(&o.version, "version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), usageHead, name)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	if o.version {
+		return o, nil
 	}
 	switch fs.NArg() {
 	case 0:

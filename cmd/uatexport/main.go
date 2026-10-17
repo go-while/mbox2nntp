@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/go-while/mbox2nntp/internal/unpack"
+	"github.com/go-while/mbox2nntp/internal/version"
 	"github.com/go-while/mbox2nntp/uat"
 )
 
@@ -59,11 +60,16 @@ func main() {
 	fs.StringVar(&unpack.Zstd, "zstd", "", "the zstd program at `PATH` (default: zstd in PATH)")
 	fs.StringVar(&unpack.Xz, "xz", "", "the xz program at `PATH` for .usenet.xz (default: xz in PATH, else 7-Zip)")
 	fs.StringVar(&unpack.SevenZip, "7z", "", "the 7-Zip program at `PATH` for .usenet.7z (default: 7z, 7zz or 7za in PATH)")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), usage, filepath.Base(os.Args[0]))
 		fs.PrintDefaults()
 	}
 	fs.Parse(os.Args[1:])
+	if *showVersion {
+		fmt.Println(version.String("uatexport"))
+		return
+	}
 	if fs.NArg() != 1 {
 		fs.Usage()
 		os.Exit(2)
