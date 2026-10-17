@@ -1,0 +1,211 @@
+package main
+
+import (
+	"archive/tar"
+	"bufio"
+	"bytes"
+	"compress/gzip"
+	"encoding/binary"
+	"io"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/newscache"
+	"github.com/go-while/mbox2nntp/newscache/newscachetest"
+)
+
+const (
+	// crossposted: in both groups' directories
+	cross = "Path: a!not-for-mail\r\nNewsgroups: h.one,h.two\r\nSubject: cross\r\nDate: Sat, 3 Jan 2004 02:40:01 +0000 (UTC)\r\nMessage-ID: <cross@x>\r\n\r\nFrom the start\r\n..dot\r\n"
+	// inside h.one's .db
+	inline = "Path: a!not-for-mail\r\nNewsgroups: h.one\r\nSubject: inline\r\nMessage-ID:\r\n <inline@x>\r\n\r\nsmall\r\n"
+	noID   = "Path: a!not-for-mail\r\nNewsgroups: h.two\r\nSubject: no id\r\n\r\n.single dot\r\n"
+)
+
+// spool is h.one with articles 1 (.art1) and 2 (inside .db), and 3 listed
+// but missing, and h.two with articles 7 and 8.
+func spool() map[string][]byte {
+	return map[string][]byte{
+		"h/one/.db": newscachetest.DB(binary.LittleEndian, 8, 1, 3, map[uint64]newscachetest.Record{
+			1: {Type: newscachetest.Overview, Data: "1\tcross"},
+			2: {Type: newscachetest.Article, Data: inline},
+			3: {Type: newscachetest.Overview, Data: "3\tgone"},
+		}),
+		"h/one/.art1": []byte(cross),
+		"h/two/.art7": []byte(cross),
+		"h/two/.art8": []byte(noID),
+	}
+}
+
+// .art1 before the .db of its group, as tar may store them
+var order = []string{"h/one/.art1", "h/one/.db", "h/two/.art7", "h/two/.art8"}
+
+func tarball(t *testing.T, gz bool) []byte {
+	var buf bytes.Buffer
+	var zw *gzip.Writer
+	tw := tar.NewWriter(&buf)
+	if gz {
+		zw = gzip.NewWriter(&buf)
+		tw = tar.NewWriter(zw)
+	}
+	files := spool()
+	for _, name := range order {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(files[name]))}); err != nil {
+			t.Fatal(err)
+		}
+		tw.Write(files[name])
+	}
+	tw.Close()
+	if zw != nil {
+		zw.Close()
+	}
+	return buf.Bytes()
+}
+
+// readBack parses an mbox with go-lib-mbox2nntp, mbox2nntp's parser, and
+// returns each article's headers and body.
+func readBack(t *testing.T, path string) (heads [][]string, bodies []string) {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	var r io.Reader = f
+	if strings.HasSuffix(path, ".gz") {
+		zr, err := gzip.NewReader(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = zr
+	}
+	mr, err := mbox.CreateMboxStream(bufio.NewReader(r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		m, err := mr.ReadMessage()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(m.BodyReader())
+		heads = append(heads, m.Headers())
+		bodies = append(bodies, string(b))
+	}
+}
+
+func head(text string) []string {
+	h, _, _ := newscache.Split([]byte(text))
+	return h
+}
+
+func TestExportTar(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "h.tar.gz")
+	os.WriteFile(in, tarball(t, true), 0644)
+	t.Chdir(dir)
+	st, err := export(in, nil, options{dedup: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.out != "h.mbox" || st.n != 3 || st.dups != 1 || st.noID != 1 || st.oddDots != 1 ||
+		st.Groups != 2 || st.Files != 3 || st.InDB != 1 || st.Missing != 1 {
+		t.Errorf("stats %+v", st)
+	}
+	heads, bodies := readBack(t, "h.mbox")
+	if want := [][]string{head(cross), head(inline), head(noID)}; !reflect.DeepEqual(heads, want) {
+		t.Errorf("headers %q\nwant %q", heads, want)
+	}
+	// the doubled dot undone, the single one kept, "From " quoted
+	data, _ := os.ReadFile("h.mbox")
+	for _, want := range []string{
+		"From nobody Sat Jan  3 02:40:01 2004\n",
+		"\n>From the start\n.dot\n",
+		"\n.single dot\n",
+	} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("mbox lacks %q", want)
+		}
+	}
+	if strings.Contains(string(data), "\r") {
+		t.Error("CR left in the mbox")
+	}
+	if len(bodies) != 3 {
+		t.Errorf("%d bodies", len(bodies))
+	}
+	if _, err := export(in, nil, options{dedup: true}); err == nil {
+		t.Error("an existing mbox was replaced")
+	}
+
+	// every copy, gzipped
+	st, err = export(in, nil, options{gzip: 6})
+	if err != nil || st.out != "h.mbox.gz" || st.n != 4 || st.dups != 0 {
+		t.Errorf("-dedup=false -gzip: %+v, %v", st, err)
+	}
+	if heads, _ := readBack(t, "h.mbox.gz"); len(heads) != 4 {
+		t.Errorf("-dedup=false: read back %d articles", len(heads))
+	}
+}
+
+// "-" reads a plain tar from stdin; a directory gives the same articles in
+// group and number order.
+func TestExportStdinAndDir(t *testing.T) {
+	dir := t.TempDir()
+	st, err := export("-", bytes.NewReader(tarball(t, false)), options{out: filepath.Join(dir, "stdin.mbox"), dedup: true})
+	if err != nil || st.n != 3 {
+		t.Fatalf("stdin: %+v, %v", st, err)
+	}
+	root := filepath.Join(dir, "spool", "h")
+	for name, data := range spool() {
+		p := filepath.Join(dir, "spool", filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		os.WriteFile(p, data, 0644)
+	}
+	st, err = export(root, nil, options{out: filepath.Join(dir, "dir.mbox"), dedup: true})
+	if err != nil || st.n != 3 || st.Missing != 1 {
+		t.Fatalf("dir: %+v, %v", st, err)
+	}
+	a, _ := os.ReadFile(filepath.Join(dir, "stdin.mbox"))
+	b, _ := os.ReadFile(filepath.Join(dir, "dir.mbox"))
+	if !bytes.Equal(a, b) {
+		t.Errorf("stdin and directory differ:\n%s\n----\n%s", a, b)
+	}
+}
+
+// A tarball that breaks off leaves neither the output nor its temporary
+// file.
+func TestExportTruncated(t *testing.T) {
+	dir := t.TempDir()
+	data := tarball(t, false)
+	_, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: filepath.Join(dir, "x.mbox")})
+	if err == nil {
+		t.Error("no error")
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("left %v", entries)
+	}
+}
+
+func TestOutName(t *testing.T) {
+	for in, want := range map[string]string{
+		"babbel-net.tar.gz":                 "babbel-net.mbox",
+		"/x/rainbow.tgz":                    "rainbow.mbox",
+		"a.b.tar":                           "a.b.mbox",
+		"/spool/comp/":                      "comp.mbox",
+		"textusenet-backup_9/97comp.tar.gz": "97comp.mbox",
+	} {
+		if got := outName(in, false); got != want {
+			t.Errorf("outName(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if got := outName("a.tar.gz", true); got != "a.mbox.gz" {
+		t.Errorf("gz: %q", got)
+	}
+}

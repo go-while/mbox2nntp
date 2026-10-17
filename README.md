@@ -4,15 +4,16 @@ Feeds Usenet archives in mbox form to an NNTP server, one article at a time, wit
 `IHAVE`. It was written to load the archive.org Usenet collections (`gna-clari`,
 `usenet-clari`, the `usenet-*` and `FULL-USENET-BACKUP-*` items) into INN2. It also reads
 the archives of the [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive)
-(see [UAT archives](#uat-archives)).
+(see [UAT archives](#uat-archives)), and `ncexport` turns the NewsCache spools of the
+`textusenet-backup` items into mbox files (see [NewsCache spools](#newscache-spools-textusenet-backup)).
 
 Each run takes one input: an mbox, a compressed mbox, a UAT archive, or a directory of
 article files.
 
 ## Download
 
-[Releases](https://github.com/go-while/mbox2nntp/releases) have ready-built `mbox2nntp` and
-`uatexport` for Linux, Windows, macOS (amd64, arm64) and FreeBSD (amd64), with a SHA-256
+[Releases](https://github.com/go-while/mbox2nntp/releases) have ready-built `mbox2nntp`,
+`uatexport` and `ncexport` for Linux, Windows, macOS (amd64, arm64) and FreeBSD (amd64), with a SHA-256
 checksum file. `mbox2nntp -version` prints which one you have. A release is built by
 `.github/workflows/release.yml` when a `v*` tag is pushed, or by running that workflow from
 the Actions tab with a version to tag.
@@ -30,6 +31,7 @@ GOOS=windows GOARCH=amd64 go build -o mbox2nntp.exe .   # Windows
 GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
 GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 go build -o uatexport ./cmd/uatexport                   # the UAT exporter
+go build -o ncexport ./cmd/ncexport                     # the NewsCache exporter
 ```
 
 Needs Go 1.27.2 or later. Apart from the Go standard library, the only dependency is the
@@ -201,6 +203,54 @@ The mbox is mboxrd (`From ` body lines get a `>`), with a `From nobody DATE` lin
 mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
 to a server, give mbox2nntp the `.usenet` file, not the exported mbox: it does not un-escape
 `>From ` lines. An exported directory works as a `DIR` input.
+
+### NewsCache spools (textusenet-backup)
+
+The archive.org `textusenet-backup_*` items (30 items, 977 GB) hold `.tar.gz` files, one per
+hierarchy (`97comp.tar.gz`, `rainbow.tar.gz`, ...), each the spool of a
+[NewsCache](https://github.com/hstraub/NewsCache) server: one directory per newsgroup
+(`rainbow/test` for `rainbow.test`) with a `.db` file and `.artN` files. `ncexport` writes
+such a spool out as one mbox file:
+
+```
+go build -o ncexport ./cmd/ncexport
+ncexport -gzip rainbow.tar.gz                           # writes rainbow.mbox.gz
+curl -sL https://archive.org/download/textusenet-backup_9/97comp.tar.gz |
+    ncexport -gzip -o 97comp.mbox.gz -                  # straight from the download
+ncexport -o comp.mbox /var/spool/newscache/comp         # an unpacked spool directory
+```
+
+A tarball is read as a stream in one pass: nothing is unpacked to disk, and it can come
+from a pipe. The output appears under its name only when complete, as with uatexport, and
+an existing one is never replaced.
+
+- **Where the articles are.** NewsCache stores an article of 15 KB or less inside the `.db`
+  and a bigger one in `.artN`. The server behind the backup ran a modified NewsCache that
+  put every article in an `.artN` file. ncexport reads both.
+- **What is changed.** NewsCache keeps an article as the server sent it: CRLF line ends and
+  leading dots doubled. ncexport turns line ends into LF and doubled dots back into single
+  ones. Nothing else changes. A few damaged yEnc articles also have lines with a single
+  leading dot, which cannot come from doubling: those lines are kept as they are, and the
+  summary counts the articles.
+- **Crossposts.** An article crossposted to several groups is in each group's directory.
+  ncexport writes it once, the first time its Message-ID turns up; `-dedup=false` writes
+  every copy.
+- **Order.** A tarball's articles are written in the tarball's order, a directory's group by
+  group and by article number. The mbox is mboxrd, with `From nobody DATE` taken from the
+  Date header, as uatexport writes it.
+- **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
+  files. It also counts the crossposted copies skipped, and the articles the `.db` lists
+  but the spool does not have (overview only, never fetched by the cache).
+
+Checked on `97comp.tar.gz` (757 articles) and `rainbow.tar.gz` (518 articles from 616
+files in 34 groups). Every article mbox2nntp's parser reads back from the mbox equals the
+stored one, with line ends and dots undone. Then give the `.mbox.gz` to mbox2nntp. Expect
+it to skip articles with an empty body (24 in `97comp`), which some spam has, and yEnc
+binaries unless `-keep-binary` is given.
+
+Other programs can read NewsCache spools with the package
+`github.com/go-while/mbox2nntp/newscache` (standard library only); `newscache/newscachetest`
+builds `.db` files for their tests.
 
 ### The old positional form
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the release archives into dist/: mbox2nntp and uatexport for each
+# Builds the release archives into dist/: mbox2nntp, uatexport and ncexport for each
 # target, with README.md and LICENSE, plus a SHA-256 checksum file.
 # Used by .github/workflows/release.yml; runs the same on a Linux machine.
 #
@@ -25,7 +25,7 @@ for target in $targets; do
 	name="mbox2nntp_${tag}_${goos}_${goarch}"
 	dir="dist/$name"
 	mkdir -p "$dir"
-	for cmd in mbox2nntp:. uatexport:./cmd/uatexport; do
+	for cmd in mbox2nntp:. uatexport:./cmd/uatexport ncexport:./cmd/ncexport; do
 		CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
 			go build -trimpath -ldflags "$ldflags" -o "$dir/${cmd%%:*}$ext" "${cmd#*:}"
 	done
