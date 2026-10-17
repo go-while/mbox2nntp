@@ -170,6 +170,29 @@ To feed a server you need no mbox at all: give mbox2nntp the archive. Keep the
 `.usenet.xz`/`.7z` files: they are the toolkit's own data, and an exported mbox is not the
 same, since mbox2nntp does not undo the `>From ` quoting of mboxrd.
 
+To download a whole collection and export every group, there is
+[`contrib/uat-fetch-export.sh`](contrib/uat-fetch-export.sh) (bash and curl; `ia` or `jq`
+for archive.org). It fetches the nereid directory listing and the archive.org metadata
+(one request each), downloads the archives one at a time, with a pause between files
+(`-p`, 2 s), an optional bandwidth cap (`-r 2M`, curl `--limit-rate`) and retries,
+resumes interrupted downloads, and checks them (archive.org by md5, nereid by size and
+`xz -t`). Then it runs uatexport on each, to `GROUP.mbox.gz` by default. Downloads and
+exports that are complete are skipped, so it can be stopped and run again.
+
+```
+go build -o uatexport ./cmd/uatexport
+contrib/uat-fetch-export.sh -n                          # what it would do, with sizes
+contrib/uat-fetch-export.sh -s archive --sort size -l 3 # the 3 smallest archive.org groups
+contrib/uat-fetch-export.sh -s nereid -m '^pl\.comp\.' -d /srv/uat -o /srv/mbox -r 5M
+contrib/uat-fetch-export.sh --download-only             # only the archives
+contrib/uat-fetch-export.sh -h                          # all options
+```
+
+For both collections (372 groups, 45.8 GB of archives) expect about 25 GB of
+`.mbox.gz` (115 GB as plain `.mbox`), and room to unpack the largest archive,
+`pl.soc.polityka` (1.9 GB, about 3.5 GB unpacked). `--delete-archive` removes each archive
+once its group is exported.
+
 Other programs can read UAT archives with the package `github.com/go-while/mbox2nntp/uat`
 (standard library only, plus the zstd program); `uat/uattest` writes small archives for
 their tests.
