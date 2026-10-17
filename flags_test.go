@@ -12,13 +12,13 @@ import (
 
 func TestParseArgsFlags(t *testing.T) {
 	o, err := parseArgs("m", []string{"-server", "news:119", "-workers", "4", "-tmpdir", "/t",
-		"-dry-run", "-keep-binary", "-no-dos2unix", "-dos2unix", "/opt/d2u", "-timeout", "30s",
+		"-dry-run", "-keep-binary", "-no-dos2unix", "-dos2unix", "/opt/d2u", "-7z", "/opt/7zz", "-timeout", "30s",
 		"-max-tries", "3", "-prehash=false", "-lax-msgid=false", "a.mbox.gz"}, &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := options{input: "a.mbox.gz", server: "news:119", workers: 4, tmpdir: "/t", dryRun: true,
-		keepBinary: true, noDos2unix: true, dos2unix: "/opt/d2u", timeout: 30 * time.Second,
+		keepBinary: true, noDos2unix: true, dos2unix: "/opt/d2u", sevenZip: "/opt/7zz", timeout: 30 * time.Second,
 		maxTries: 3, prehash: false, laxMsgid: false}
 	if *o != want {
 		t.Errorf("got %+v\nwant %+v", *o, want)

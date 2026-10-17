@@ -16,6 +16,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: 7-Zip, for TestUn7zTo
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = macOS ] && ! command -v 7z && ! command -v 7zz; then brew install sevenzip; fi
+          if [ "$RUNNER_OS" = Linux ] && ! command -v 7z; then sudo apt-get update && sudo apt-get install -y 7zip; fi
       - run: go vet ./...
       - run: go test -race ./...
       - name: gofmt

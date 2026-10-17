@@ -758,8 +758,7 @@ against a real INN.
   `ParseHeaderKeys` (and `GetMessageID` under it) was actually called; the other names
   appear in comments only. Both were copied into `headers.go` unchanged, and compared with
   the original on every header block in the corpus (10,555,466 comparisons, lax and
-  strict, none different). `go.mod` now needs `regexp2`, `go-lib-mbox2nntp` and
-  `bodgit/sevenzip`. One bug came along with the copy and is marked, not fixed:
+  strict, none different). `go.mod` now needs `regexp2` and `go-lib-mbox2nntp`. One bug came along with the copy and is marked, not fixed:
   `GetMessageID`'s strict mode tests the literal `"msgid"` for an `@`, so without
   `-lax-msgid` (on by default) no Message-ID is accepted.
 
@@ -796,9 +795,13 @@ against a real INN.
   was enough to skip a file in every later batch run. Now a dry run needs no server and
   never marks an input done. See `README.md`.
 - **RESOLVED — runs on Windows and macOS.** Beyond the dependency tree above:
-  `unzip` and `7z` were run from `/usr/bin`, and are now replaced by `archive/zip` and
-  `bodgit/sevenzip` (all 891 usenet-clari zips and the FULL-USENET-BACKUP 7z unpack
-  byte-identical to the tools). `dos2unix` ran on every mbox, rewrote a plain `.mbox` in
+  `unzip` and `7z` were run from `/usr/bin`. `unzip` is replaced by `archive/zip` (all
+  891 usenet-clari zips unpack byte-identical to it). For 7z there is no reader in the
+  standard library, and the module takes no third-party code (`bodgit/sevenzip` was tried
+  and dropped: 11 indirect modules), so 7-Zip is still run, found by `exec.LookPath`
+  (`-7z PATH`, else `7z`, `7zz`, `7za`, and on Windows its install directory). It
+  extracts only `NAME.mbox`, to stdout, after listing the archive to make sure that entry
+  exists. `dos2unix` ran on every mbox, rewrote a plain `.mbox` in
   place, and was checked by Unix exec bits Windows never reports; it now runs only with
   `-dos2unix PATH`. Across all 2,262 corpus inputs (556 containing CR) every article goes
   out byte-identical without it. The mbox file was never closed, so on Windows the `.done`

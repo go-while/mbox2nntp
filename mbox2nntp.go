@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	//"regexp"
 	"sort"
@@ -29,7 +30,6 @@ import (
 	//"math/rand"
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	//"github.com/edsrzf/mmap-go"
-	"github.com/bodgit/sevenzip"
 	"github.com/go-while/go-lib-mbox2nntp"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
 	//"nntp/data/overview"
@@ -464,27 +464,85 @@ func unzipTo(archive, dst string) error {
 	return fmt.Errorf("no entry '%s' in the archive", name)
 }
 
-// un7zTo is unzipTo for 7z archives, replacing /usr/bin/7z x. The
-// FULL-USENET-BACKUP items hold just NAME.mbox, LZMA2-compressed.
+// SEVENZIP is the 7-Zip program that unpacks .7z inputs, set with -7z.
+// Empty means the first of 7z, 7zz and 7za found in PATH, or on Windows
+// 7-Zip's install directory. Go's standard library has no 7z reader, and
+// this module takes no third-party code.
+var SEVENZIP = ""
+
+func find7z() (string, error) {
+	if SEVENZIP != "" {
+		return exec.LookPath(SEVENZIP)
+	}
+	names := []string{"7z", "7zz", "7za"}
+	if runtime.GOOS == "windows" {
+		// The 7-Zip installer does not add itself to PATH.
+		names = append(names, filepath.Join(os.Getenv("ProgramFiles"), "7-Zip", "7z.exe"))
+	}
+	for _, name := range names {
+		if path, err := exec.LookPath(name); err == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("no 7z, 7zz or 7za in PATH: install 7-Zip, or give its path with -7z")
+}
+
+// un7zTo is unzipTo for 7z archives. The FULL-USENET-BACKUP items hold just
+// NAME.mbox, LZMA2-compressed. It lists the archive first, because 7z
+// succeeds and writes nothing when asked for a name that is not there, then
+// streams that one entry to dst. "--" ends the switches, so an archive
+// named "-x" or "@x" is a file name, and -spd turns off wildcards in the
+// entry name.
 func un7zTo(archive, dst string) error {
-	z, err := sevenzip.OpenReader(archive)
+	prog, err := find7z()
 	if err != nil {
 		return err
 	}
-	defer z.Close()
 	name := filepath.Base(dst)
-	for _, f := range z.File {
-		if f.Name != name {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		defer rc.Close()
-		return writeTo(dst, rc)
+	var stderr bytes.Buffer
+	list := exec.Command(prog, "l", "-slt", "-spd", "--", archive)
+	list.Stderr = &stderr
+	out, err := list.Output()
+	if err != nil {
+		return fmt.Errorf("%s l: %v: %s", prog, err, strings.TrimSpace(stderr.String()))
 	}
-	return fmt.Errorf("no entry '%s' in the archive", name)
+	if !has7zEntry(string(out), name) {
+		return fmt.Errorf("no entry '%s' in the archive", name)
+	}
+	stderr.Reset()
+	extract := exec.Command(prog, "e", "-so", "-bd", "-spd", "--", archive, name)
+	extract.Stderr = &stderr
+	stdout, err := extract.StdoutPipe()
+	if err != nil {
+		return err
+	}
+	if err := extract.Start(); err != nil {
+		return err
+	}
+	werr := writeTo(dst, stdout)
+	if werr != nil {
+		extract.Process.Kill() // it would block on a full pipe
+	}
+	if err := extract.Wait(); err != nil { // 7z checks the CRC and exits 2 on a mismatch
+		return fmt.Errorf("%s e: %v: %s", prog, err, strings.TrimSpace(stderr.String()))
+	}
+	return werr
+}
+
+// has7zEntry reports whether the output of "7z l -slt" lists a top-level
+// entry called name. Entries follow the "----------" line, one
+// "Path = ..." line each; the "Path = " lines above it are the archive's.
+func has7zEntry(listing, name string) bool {
+	entries := false
+	for _, line := range strings.Split(listing, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "----------" {
+			entries = true
+		} else if entries && line == "Path = "+name {
+			return true
+		}
+	}
+	return false
 }
 
 func writeTo(dst string, r io.Reader) error {

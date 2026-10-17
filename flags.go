@@ -22,6 +22,7 @@ type options struct {
 	keepBinary bool
 	noDos2unix bool
 	dos2unix   string
+	sevenZip   string
 	timeout    time.Duration
 	maxTries   int
 	prehash    bool
@@ -73,6 +74,7 @@ func parseArgs(name string, args []string, out io.Writer) (*options, error) {
 	fs.BoolVar(&o.keepBinary, "keep-binary", false, "send yEnc (=ybegin) articles instead of dropping them")
 	fs.BoolVar(&o.noDos2unix, "no-dos2unix", false, "do not run -dos2unix (same as a .nodos2unix file in the working directory); kept for old scripts")
 	fs.StringVar(&o.dos2unix, "dos2unix", o.dos2unix, "run the dos2unix at `PATH` on each mbox first, rewriting a plain .mbox in place; off by default, not needed")
+	fs.StringVar(&o.sevenZip, "7z", "", "the 7-Zip program at `PATH` that unpacks .7z inputs (default: 7z, 7zz or 7za in PATH)")
 	fs.DurationVar(&o.timeout, "timeout", o.timeout, "limit on each read or write on a server connection")
 	fs.IntVar(&o.maxTries, "max-tries", o.maxTries, "tries per article after 436 or a lost connection, then it counts as an error")
 	fs.BoolVar(&o.prehash, "prehash", o.prehash, "send \"IHAVE <msgid> <sha256>\"; -prehash=false sends plain \"IHAVE <msgid>\"")
@@ -148,6 +150,7 @@ func (o *options) apply() {
 	DROPBINARY = !o.keepBinary
 	NODOS2UNIX = o.noDos2unix || fileExists(".nodos2unix")
 	DOS2UNIX = o.dos2unix
+	SEVENZIP = o.sevenZip
 	NNTP_TIMEOUT = o.timeout
 	MAX_TRIES = o.maxTries
 	PREHASH_MODE = o.prehash

@@ -8,8 +8,9 @@ Each run takes one input: an mbox, a compressed mbox, or a directory of article 
 
 ## Build
 
-Runs on Linux, Windows and macOS, as one binary that needs no other programs:
-`.gz`, `.zip` and `.7z` archives are unpacked in-process.
+Runs on Linux, Windows and macOS, as one binary. `.gz` and `.zip` archives are unpacked
+in-process. `.7z` archives need the 7-Zip program, because Go's standard library has no 7z
+reader (see [7z archives](#7z-archives)).
 
 ```
 go build -o mbox2nntp .                                 # for this machine
@@ -18,10 +19,9 @@ GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
 GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 ```
 
-Needs Go 1.27.1 or later. All dependencies resolve from GitHub. The mbox parser is
-[`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
-`github.com/sam-falvo/mbox`. 7z archives are read with
-[`github.com/bodgit/sevenzip`](https://github.com/bodgit/sevenzip).
+Needs Go 1.27.1 or later. Apart from the Go standard library, the only dependency is the
+mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
+`github.com/sam-falvo/mbox`.
 
 ## Usage
 
@@ -43,6 +43,7 @@ mbox2nntp [flags] -dry-run INPUT
 | `-server HOST:PORT` | (required) | the NNTP server; not needed with `-dry-run` |
 | `-workers N` | `1` | parallel connections |
 | `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked |
+| `-7z PATH` | `7z`, `7zz` or `7za` | the 7-Zip program for `.7z` inputs |
 | `-dry-run` | off | parse and rewrite articles, but connect to no server and send nothing; the input is never marked done |
 | `-keep-binary` | off | send yEnc (`=ybegin`) articles instead of dropping them |
 | `-dos2unix PATH` | none | run this `dos2unix` on each mbox first, as older versions always did; not needed, see below |
@@ -72,6 +73,19 @@ anyway, `-dos2unix` takes its path or name: `dos2unix` from a Linux distribution
 Homebrew (`brew install dos2unix`), or `dos2unix.exe` on Windows, which Git for Windows
 ships in `C:\Program Files\Git\usr\bin`. It then rewrites a plain mbox in place, as
 before.
+
+### 7z archives
+
+A `.7z` input is unpacked by running 7-Zip: the `-7z` program, or else the first of `7z`,
+`7zz` and `7za` in `PATH`, and on Windows also `C:\Program Files\7-Zip\7z.exe`. Only the
+entry `NAME.mbox` is extracted. 7-Zip checks the CRC, and a damaged archive is a fatal
+error.
+
+- **Linux:** the `7zip` package (Debian, Ubuntu), or `p7zip`.
+- **macOS:** `brew install sevenzip`, which installs `7zz`.
+- **Windows:** the 7-Zip installer from [7-zip.org](https://www.7-zip.org/).
+
+`.gz`, `.zip`, plain mbox and directory inputs need no other program.
 
 ### The old positional form
 
@@ -103,7 +117,8 @@ come back as `435` and cost little.
 
 The process exits 0 when it finishes a run, whether or not the input was marked done; the
 `.done` rename is the signal. It exits 2 on a command-line error, and 1 on a fatal
-error (an input that cannot be opened or unpacked, a `-dos2unix` that cannot be found).
+error (an input that cannot be opened or unpacked, a `-dos2unix` that cannot be found, no
+7-Zip for a `.7z` input).
 
 ## What is sent
 

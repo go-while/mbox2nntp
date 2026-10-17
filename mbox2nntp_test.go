@@ -733,15 +733,50 @@ func TestUnzipTo(t *testing.T) {
 }
 
 func TestUn7zTo(t *testing.T) {
-	archive := filepath.Join(t.TempDir(), "x.mbox.7z")
+	if _, err := find7z(); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatal(err) // the workflow installs 7-Zip
+		}
+		t.Skip(err)
+	}
+	dir := t.TempDir()
 	data, err := os.ReadFile("testdata/x.mbox.7z") // made by 7z a -m0=LZMA2, with other.txt
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A name 7z must not read as a switch.
+	archive := filepath.Join(dir, "-x.mbox.7z")
 	if err := os.WriteFile(archive, data, 0644); err != nil {
 		t.Fatal(err)
 	}
 	testExtractor(t, un7zTo, archive, "From nobody Thu Dec  8 12:55:04 2016\nSubject: 7z\nMessage-ID: <7z@test>\n\nbody\n")
+
+	// A damaged archive is an error, not a short mbox.
+	bad := append([]byte(nil), data...)
+	bad[40] ^= 0xff // in the packed data, which starts after the 32-byte signature header
+	if err := os.WriteFile(archive, bad, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
+		t.Error("damaged archive: err = nil")
+	}
+
+	saved := SEVENZIP
+	t.Cleanup(func() { SEVENZIP = saved })
+	SEVENZIP = "no-such-7z"
+	if err := un7zTo(archive, filepath.Join(dir, "x.mbox")); err == nil {
+		t.Error("-7z no-such-7z: err = nil")
+	}
+}
+
+func TestHas7zEntry(t *testing.T) {
+	listing := "\n7-Zip 25.01\n\nListing archive: x.mbox.7z\n\n--\nPath = x.mbox.7z\nType = 7z\n\n" +
+		"----------\nPath = x.mbox\nSize = 5\n\nPath = sub/y.mbox\r\nSize = 5\r\n"
+	for name, want := range map[string]bool{"x.mbox": true, "x.mbox.7z": false, "y.mbox": false, "sub/y.mbox": true, "": false} {
+		if got := has7zEntry(listing, name); got != want {
+			t.Errorf("has7zEntry(%q) = %t, want %t", name, got, want)
+		}
+	}
 }
 
 func testExtractor(t *testing.T, fn func(archive, dst string) error, archive, want string) {
