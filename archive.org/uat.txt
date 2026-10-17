@@ -1,3 +1,5 @@
 # UAT archives (Usenet Archive Toolkit, https://github.com/wolfpld/usenetarchive)
 # Archive of polish usenet: https://usenet.nereid.pl/
-{"identifier": "usenet-uat-pc-games"} # PC games usenet archive https://archive.org/details/usenet-uat-pc-games
+# total: 2 items, 46585356320 bytes (46.59 GB)
+{"identifier": "usenet-uat-pc-games"} # 6453381373 bytes (6.45 GB), 44 files # PC games usenet archive https://archive.org/details/usenet-uat-pc-games
+{"identifier": "usenet-uat-pl"} # 40131974947 bytes (40.13 GB), 337 files # Polish usenet archive (pl.* and alt.pl.*) https://archive.org/details/usenet-uat-pl
