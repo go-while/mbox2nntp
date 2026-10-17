@@ -1,4 +1,2 @@
-github.com/dlclark/regexp2 v1.12.0 h1:0j4c5qQmnC6XOWNjP3PIXURXN2gWx76rd3KvgdPkCz8=
-github.com/dlclark/regexp2 v1.12.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261015221219-605980f6cfcf h1:Ie2LmVRLY61A5Kr4kk1xAOeWgQbJ2IVK8NKT7x85oJA=
-github.com/go-while/go-lib-mbox2nntp v0.0.0-20261015221219-605980f6cfcf/go.mod h1:MEIRSMt4r5TY1qZySP/xMxuTS8boWLQkwL60Pty9uWc=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84 h1:yQzXJ/O27HKj8ft2erWuErDnG5EtW9Vkx1BnenUPDSk=
+github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017083307-028f55355c84/go.mod h1:C/4BQE5gxV6BeHycS1wJ5iugN/nWFApPE/pa3mkkB6s=
