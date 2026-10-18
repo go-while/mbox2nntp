@@ -45,7 +45,8 @@ identifier listed twice is taken once.
 
 For each item the file list comes from the archive.org metadata. The files
 of the upload are downloaded, not the ones archive.org makes itself
-(_meta.xml, _files.xml, _meta.sqlite, .torrent and the like); -include and
+(_meta.xml, _files.xml, _meta.sqlite, .torrent and the like) nor the old
+versions archive.org keeps under history/; -include and
 -exclude choose among them by name. A file is written to FILE.part, resumed
 from there after an interruption, and renamed to FILE when its size and md5
 match the metadata. Failed requests are retried with a growing pause.

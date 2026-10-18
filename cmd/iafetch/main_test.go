@@ -73,7 +73,8 @@ func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// What archive.org adds to every item: not to be downloaded.
 		out.Files = append(out.Files, jf{id + "_meta.xml", "original", "10", ""}, jf{id + "_files.xml", "original", "", ""},
-			jf{id + ".torrent", "metadata", "5", ""}, jf{id + "_meta.sqlite", "original", "8", ""}, jf{"thumb.jpg", "derivative", "3", ""})
+			jf{id + ".torrent", "metadata", "5", ""}, jf{id + "_meta.sqlite", "original", "8", ""}, jf{"thumb.jpg", "derivative", "3", ""},
+			jf{"history/files/old.mbox.7z.~1~", "original", "4", ""})
 		json.NewEncoder(w).Encode(out)
 	case strings.HasPrefix(p, "/download/"):
 		id, name, _ := strings.Cut(strings.TrimPrefix(p, "/download/"), "/")
@@ -168,8 +169,10 @@ func TestDownloadThenSkipWhenMoved(t *testing.T) {
 			t.Errorf("%s: %q, %v", p, b, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(o.out, "item-a", "item-a_meta.xml")); err == nil {
-		t.Error("archive.org's own _meta.xml was downloaded")
+	for _, p := range []string{"item-a/item-a_meta.xml", "item-a/history"} {
+		if _, err := os.Stat(filepath.Join(o.out, p)); err == nil {
+			t.Errorf("%s was downloaded", p)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(o.out, "gna-junk")); err == nil {
 		t.Error("tier X item downloaded")

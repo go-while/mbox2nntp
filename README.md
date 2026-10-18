@@ -275,7 +275,8 @@ iafetch -status -db /data/iafetch.sqlite                # what the database reco
 
 - **What is downloaded.** The files of the upload, by the item's archive.org metadata: not
   the files archive.org makes itself (`_meta.xml`, `_files.xml`, `_meta.sqlite`,
-  `.torrent`). `-include` and `-exclude` choose among them by regexp, `-tier`, `-list`,
+  `.torrent`), nor the replaced versions it keeps under `history/` (most
+  `FULL-USENET-BACKUP-*` items have one, as big as the current file). `-include` and `-exclude` choose among them by regexp, `-tier`, `-list`,
   `-match`, `-from`, `-to` and `-limit` choose the items. Tier `X` (not Usenet) is left out
   unless `-tier` names it.
 - **Order and parallelism.** Items are taken by the list's `order` column; their files go to

@@ -33,13 +33,18 @@ type iaMeta struct {
 }
 
 // generated are suffixes of the files archive.org makes itself for every
-// item; they are no part of the upload and are not downloaded.
+// item; they are no part of the upload and are not downloaded. Neither are
+// the files under history/: archive.org keeps there the earlier versions of
+// files that were replaced, as "history/files/NAME.~1~".
 var generated = []string{
 	"_meta.xml", "_files.xml", "_meta.sqlite", "_reviews.xml",
 	".torrent", "_torrent.txt", "__ia_thumb.jpg",
 }
 
 func isGenerated(name string) bool {
+	if strings.HasPrefix(name, "history/") {
+		return true
+	}
 	for _, s := range generated {
 		if strings.HasSuffix(name, s) {
 			return true
