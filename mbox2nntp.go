@@ -843,6 +843,19 @@ func main() {
 	} else if strings.HasSuffix(mboxfile, ".bag") {
 		is_bag = true
 
+	} else if strings.HasSuffix(mboxfile, ".txt") {
+		// read as an mbox, like a .bag, if it is one
+		ok, err := isMboxText(mboxfile)
+		if err != nil {
+			log.Printf("ERROR: %v", err)
+			os.Exit(1)
+		}
+		if !ok {
+			log.Printf("file %s is not an mbox: a .txt input must begin with a \"From \" line", mboxfile)
+			os.Exit(1)
+		}
+		is_bag = true
+
 	} else if uatsuffix != "" {
 		group = strings.TrimSuffix(mboxfile, uatsuffix)
 

@@ -42,6 +42,7 @@ Feeds the articles in INPUT to an NNTP server with IHAVE.
 
 INPUT is one of:
   NAME.mbox, NAME.bag   an mbox file
+  NAME.txt              an mbox file, if its first line begins with "From "
   NAME.mbox.gz          gzip-compressed mbox
   NAME.mbox.zip         zip archive holding NAME.mbox
   NAME.mbox.7z          7z archive holding NAME.mbox

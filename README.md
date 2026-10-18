@@ -52,6 +52,7 @@ mbox2nntp [flags] -dry-run INPUT
 | INPUT | meaning |
 |---|---|
 | `NAME.mbox`, `NAME.bag` | an mbox file |
+| `NAME.txt` | an mbox file, if its first line begins with `From `, such as the Google Groups exports in the `comp_sys_atari` items on archive.org; any other `.txt` is refused |
 | `NAME.mbox.gz` | gzip-compressed mbox, one stream or many concatenated members |
 | `NAME.mbox.zip` | zip archive holding `NAME.mbox` |
 | `NAME.mbox.7z` | 7z archive holding `NAME.mbox` |
