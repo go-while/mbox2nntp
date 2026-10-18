@@ -37,6 +37,10 @@ go build -o ncexport ./cmd/ncexport                     # the NewsCache exporter
 go build -o iafetch ./cmd/iafetch                       # the archive.org downloader
 ```
 
+`./build_All.sh` builds all four at once, stamped with the `git describe` version; it
+takes an output directory, and honours `GOOS`/`GOARCH`
+(`GOOS=windows GOARCH=amd64 ./build_All.sh` gives the `.exe` files).
+
 Needs Go 1.27.2 or later. Apart from the Go standard library, mbox2nntp's only dependency is
 the mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
 `github.com/sam-falvo/mbox`. `iafetch` also uses [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite),
