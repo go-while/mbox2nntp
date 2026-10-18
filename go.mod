@@ -2,4 +2,19 @@ module github.com/go-while/mbox2nntp
 
 go 1.27.2
 
-require github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e
+require (
+	github.com/go-while/go-lib-mbox2nntp v0.0.0-20261017122104-f0412ef9498e
+	modernc.org/sqlite v1.60.1
+)
+
+require (
+	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/google/uuid v1.6.0 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.0.0 // indirect
+	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	modernc.org/libc v1.77.1 // indirect
+	modernc.org/mathutil v1.7.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
+)

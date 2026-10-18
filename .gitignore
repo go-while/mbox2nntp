@@ -29,4 +29,7 @@ go.work
 /scripts
 /uatexport
 /ncexport
+/iafetch
+/ia-download/
+iafetch.sqlite*
 /dist

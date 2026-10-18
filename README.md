@@ -6,6 +6,8 @@ Feeds Usenet archives in mbox form to an NNTP server, one article at a time, wit
 the archives of the [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive)
 (see [UAT archives](#uat-archives)), and `ncexport` turns the NewsCache spools of the
 `textusenet-backup` items into mbox files (see [NewsCache spools](#newscache-spools-textusenet-backup)).
+`iafetch` downloads the archive.org items in import order and remembers what it got (see
+[Downloading from archive.org](#downloading-from-archiveorg)).
 
 Each run takes one input: an mbox, a compressed mbox, a UAT archive, or a directory of
 article files.
@@ -13,7 +15,7 @@ article files.
 ## Download
 
 [Releases](https://github.com/go-while/mbox2nntp/releases) have ready-built `mbox2nntp`,
-`uatexport` and `ncexport` for Linux, Windows, macOS (amd64, arm64) and FreeBSD (amd64), with a SHA-256
+`uatexport`, `ncexport` and `iafetch` for Linux, Windows, macOS (amd64, arm64) and FreeBSD (amd64), with a SHA-256
 checksum file. `mbox2nntp -version` prints which one you have. A release is built by
 `.github/workflows/release.yml` when a `v*` tag is pushed, or by running that workflow from
 the Actions tab with a version to tag.
@@ -32,11 +34,13 @@ GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
 GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 go build -o uatexport ./cmd/uatexport                   # the UAT exporter
 go build -o ncexport ./cmd/ncexport                     # the NewsCache exporter
+go build -o iafetch ./cmd/iafetch                       # the archive.org downloader
 ```
 
-Needs Go 1.27.2 or later. Apart from the Go standard library, the only dependency is the
-mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
-`github.com/sam-falvo/mbox`.
+Needs Go 1.27.2 or later. Apart from the Go standard library, mbox2nntp's only dependency is
+the mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
+`github.com/sam-falvo/mbox`. `iafetch` also uses [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite),
+a SQLite written in pure Go, so it needs no C compiler and no SQLite library.
 
 ## Usage
 
@@ -251,6 +255,50 @@ binaries unless `-keep-binary` is given.
 Other programs can read NewsCache spools with the package
 `github.com/go-while/mbox2nntp/newscache` (standard library only); `newscache/newscachetest`
 builds `.db` files for their tests.
+
+### Downloading from archive.org
+
+`iafetch` downloads the items of [`archive.org/import-order.csv`](archive.org/import-order.csv)
+(or any CSV with an `identifier` column) in list order, several files at a time, to
+`DIR/ITEM/FILE`. A SQLite database records every file it downloaded and the state of
+every item. **An item recorded as done is skipped from then on without asking archive.org,
+whether or not its files are still there**, so imported files can be moved or deleted and
+the next run goes on with the items after them.
+
+```
+go build -o iafetch ./cmd/iafetch
+iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
+iafetch -tier A archive.org/import-order.csv            # the early era first
+iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
+iafetch -status -db /data/iafetch.sqlite                # what the database records
+```
+
+- **What is downloaded.** The files of the upload, by the item's archive.org metadata: not
+  the files archive.org makes itself (`_meta.xml`, `_files.xml`, `_meta.sqlite`,
+  `.torrent`). `-include` and `-exclude` choose among them by regexp, `-tier`, `-list`,
+  `-match`, `-from`, `-to` and `-limit` choose the items. Tier `X` (not Usenet) is left out
+  unless `-tier` names it.
+- **Order and parallelism.** Items are taken by the list's `order` column; their files go to
+  `-j` workers (default 4), so a big item's files download side by side and the next item
+  starts as soon as a worker is free.
+- **Checking.** A file is written to `FILE.part` and renamed to `FILE` only when its size
+  and md5 match the metadata. A stopped run (Ctrl-C) leaves `.part` files, which the next
+  run resumes with a range request. Failed requests, including the 500s archive.org
+  sometimes answers, are retried with a pause of 5 s doubling up to 5m20s (`-retries`). A
+  file that already exists under its name is checked by md5 and kept if right; a different
+  file there is an error and is never replaced.
+- **The database** (`-db`, default `./iafetch.sqlite`) has a table `items` (identifier,
+  order, tier, list, status, files, bytes, note) and a table `files` (identifier, name,
+  size, md5, path, time). An item is `done`, `incomplete` (a file failed: the next run gets
+  what is missing), `dark` (taken down on archive.org), `missing` (no such item) or `empty`
+  (no files to download). `dark`, `missing` and `empty` items are skipped until
+  `-retry-unavailable`. To fetch an item again, delete its rows:
+  `sqlite3 iafetch.sqlite "DELETE FROM items WHERE identifier='X'; DELETE FROM files WHERE identifier='X'"`.
+  Keep the database outside the download directory if files are moved from there in bulk.
+
+Some items in the list are taken down on archive.org and not in the list at all, such as
+`textusenet-backup_a`, `_c`, `_e`, `_g`, `_h`, `_n` and `_u`; `textusenet-backup_0` and
+`_f` are listed but have no files and are recorded as `empty`.
 
 ### The old positional form
 
