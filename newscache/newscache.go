@@ -294,9 +294,10 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 	s := newScan(fn)
 	br := bufio.NewReaderSize(r, 1<<16)
 	var in io.Reader = br
+	var zr *gzip.Reader
 	if magic, _ := br.Peek(2); bytes.Equal(magic, []byte{0x1f, 0x8b}) {
-		zr, err := gzip.NewReader(br)
-		if err != nil {
+		var err error
+		if zr, err = gzip.NewReader(br); err != nil {
 			return s.st, err
 		}
 		defer zr.Close()
@@ -306,6 +307,13 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
+			if zr != nil {
+				// tar stops at its end-of-archive blocks, before the gzip
+				// trailer: read to the end, which checks the CRC and size
+				if _, err := io.Copy(io.Discard, zr); err != nil {
+					return s.st, fmt.Errorf("after the last tar entry: %w", err)
+				}
+			}
 			return s.finish(), nil
 		}
 		if err != nil {

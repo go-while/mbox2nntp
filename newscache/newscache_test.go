@@ -240,3 +240,21 @@ func TestNewscachetestTypes(t *testing.T) {
 		t.Error("newscachetest's record types differ")
 	}
 }
+
+// A gzipped tarball whose gzip trailer does not match is an error: tar
+// stops before the trailer, so it was never checked (review #8).
+func TestReadTarGzipChecksum(t *testing.T) {
+	data := writeTar(t, spool(), []string{"x/y/.art2", "x/y/.db"}, true)
+	if _, err := ReadTar(bytes.NewReader(data), func(Item) error { return nil }); err != nil {
+		t.Fatalf("intact: %v", err)
+	}
+	bad := slices.Clone(data)
+	bad[len(bad)-8] ^= 0xff // the CRC-32 in the trailer
+	if _, err := ReadTar(bytes.NewReader(bad), func(Item) error { return nil }); err == nil {
+		t.Error("corrupt CRC: no error")
+	}
+	short := data[:len(data)-4] // no ISIZE
+	if _, err := ReadTar(bytes.NewReader(short), func(Item) error { return nil }); err == nil {
+		t.Error("truncated trailer: no error")
+	}
+}
