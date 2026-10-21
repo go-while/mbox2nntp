@@ -6,7 +6,9 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,12 +28,13 @@ type fakeIA struct {
 	md5s     map[string]string            // "id/name" -> md5 to advertise instead of the real one
 	dark     map[string]bool
 	fail500  map[string]int // "id/name" -> 500s to send before serving
+	stall    map[string]int // "id/name" -> bytes to send, once, before going silent
 	requests []string
 	ranges   int
 }
 
 func newFake() *fakeIA {
-	return &fakeIA{items: map[string]map[string][]byte{}, md5s: map[string]string{}, dark: map[string]bool{}, fail500: map[string]int{}}
+	return &fakeIA{items: map[string]map[string][]byte{}, md5s: map[string]string{}, dark: map[string]bool{}, fail500: map[string]int{}, stall: map[string]int{}}
 }
 
 func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -86,6 +89,16 @@ func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if f.fail500[id+"/"+name] > 0 {
 			f.fail500[id+"/"+name]--
 			http.Error(w, "busy", http.StatusInternalServerError)
+			return
+		}
+		if n, ok := f.stall[id+"/"+name]; ok {
+			delete(f.stall, id+"/"+name)
+			w.Header().Set("Content-Length", fmt.Sprint(len(b)))
+			w.Write(b[:n])
+			w.(http.Flusher).Flush()
+			f.mu.Unlock() // others may go on meanwhile
+			<-r.Context().Done()
+			f.mu.Lock()
 			return
 		}
 		if r.Header.Get("Range") != "" {
@@ -432,5 +445,88 @@ func TestOversizedPart(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("%d downloads, want 1", n)
+	}
+}
+
+// A server that stops sending in the middle of a file: the request is
+// given up after o.stall, and the next try resumes the part. It used to
+// hang the worker, and the run, for good.
+func TestStalledDownload(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789"), 1000)
+	fake.items["it"] = map[string][]byte{"big": content}
+	fake.stall["it/big"] = 3000
+	o.stall = 200 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- run(context.Background(), o, list, os.Stdout) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("run still waiting after 20s")
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+	if fake.ranges != 1 {
+		t.Errorf("%d range requests, want 1: the second try resumes", fake.ranges)
+	}
+}
+
+// The watchdog leaves a slow server alone as long as data keeps coming.
+func TestWatchdogSlowServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for i := 0; i < 5; i++ {
+			fmt.Fprint(w, "x")
+			w.(http.Flusher).Flush()
+			time.Sleep(100 * time.Millisecond)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	c := &client{http: srv.Client(), stall: 300 * time.Millisecond}
+	resp, err := c.get(context.Background(), srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil || string(b) != "xxxxx" {
+		t.Errorf("read %q, %v", b, err)
+	}
+
+	c.stall = 50 * time.Millisecond
+	resp, err = c.get(context.Background(), srv.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadAll(resp.Body); err == nil || !strings.Contains(err.Error(), "no data for 50ms") {
+		t.Errorf("stalled: err = %v", err)
+	}
+}
+
+// firstErr takes errors of any type, from any goroutine, and keeps the
+// first. atomic.Value panicked on the second type.
+func TestFirstErr(t *testing.T) {
+	var f firstErr
+	if f.get() != nil {
+		t.Fatal("not nil at first")
+	}
+	first := errors.New("first")
+	var wg sync.WaitGroup
+	f.set(first)
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.set(&os.PathError{Op: "open", Path: "x", Err: os.ErrNotExist})
+			f.set(fmt.Errorf("wrapped: %w", first))
+		}()
+	}
+	wg.Wait()
+	if f.get() != first {
+		t.Errorf("get = %v, want the first", f.get())
 	}
 }

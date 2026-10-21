@@ -297,7 +297,8 @@ iafetch -status -db /data/iafetch.sqlite                # what the database reco
 - **Checking.** A file is written to `FILE.part` and renamed to `FILE` only when its size
   and md5 match the metadata. A stopped run (Ctrl-C) leaves `.part` files, which the next
   run resumes with a range request. Failed requests, including the 500s archive.org
-  sometimes answers, are retried with a pause of 5 s doubling up to 5m20s (`-retries`). A
+  sometimes answers, are retried with a pause of 5 s doubling up to 5m20s (`-retries`). So
+  is a request that gets no data for 2 minutes (`-stall`), resuming the part. A
   file that already exists under its name is checked by md5 and kept if right; a different
   file there is an error and is never replaced.
 - **The database** (`-db`, default `./iafetch.sqlite`) has a table `items` (identifier,

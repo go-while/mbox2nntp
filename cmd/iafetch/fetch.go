@@ -64,6 +64,7 @@ type client struct {
 	agent   string
 	retries int
 	backoff time.Duration // first pause between tries; doubles, up to 64x
+	stall   time.Duration // see get; 0 for none
 	read    atomic.Int64  // bytes downloaded, for the progress line
 }
 
@@ -92,9 +93,23 @@ func (c *client) retry(ctx context.Context, what string, f func() error) error {
 	}
 }
 
+// get sends a GET for u with the extra headers hdr. A 200, 206 or 416
+// response is returned with its body to read and close; any other status
+// is an error, permanent unless it is a 429 or a 5xx.
+//
+// The request is cancelled when no data arrives for c.stall, from the start
+// to the end of the body: a server that stops sending would otherwise hold
+// a worker for good. A read then fails with an error saying so, and the
+// download is retried from where it stopped.
 func (c *client) get(ctx context.Context, u string, hdr map[string]string) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	w := &watchdog{stall: c.stall, cancel: cancel}
+	if c.stall > 0 {
+		w.timer = time.AfterFunc(c.stall, func() { w.stalled.Store(true); cancel() })
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
+		w.stop()
 		return nil, permanentError{err}
 	}
 	req.Header.Set("User-Agent", c.agent)
@@ -103,20 +118,60 @@ func (c *client) get(ctx context.Context, u string, hdr map[string]string) (*htt
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		w.stop()
+		return nil, w.wrap(err)
 	}
 	switch {
-	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent:
+	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent,
+		resp.StatusCode == http.StatusRequestedRangeNotSatisfiable: // the caller decides
+		w.body = resp.Body
+		resp.Body = w
 		return resp, nil
-	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-		return resp, nil // the caller decides
 	}
+	w.stop()
 	resp.Body.Close()
 	err = fmt.Errorf("%s: %s", u, resp.Status)
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return nil, err
 	}
 	return nil, permanentError{err}
+}
+
+// watchdog is the body of a response from get, and cancels its request
+// when no data arrives for stall.
+type watchdog struct {
+	body    io.ReadCloser
+	stall   time.Duration
+	timer   *time.Timer // nil without a stall limit
+	cancel  context.CancelFunc
+	stalled atomic.Bool
+}
+
+func (w *watchdog) Read(p []byte) (int, error) {
+	n, err := w.body.Read(p)
+	if n > 0 && w.timer != nil {
+		w.timer.Reset(w.stall)
+	}
+	return n, w.wrap(err)
+}
+
+func (w *watchdog) Close() error {
+	w.stop()
+	return w.body.Close()
+}
+
+func (w *watchdog) stop() {
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.cancel()
+}
+
+func (w *watchdog) wrap(err error) error {
+	if err != nil && err != io.EOF && w.stalled.Load() {
+		return fmt.Errorf("no data for %s: %w", w.stall, err)
+	}
+	return err
 }
 
 // metadata fetches the file list of an item.

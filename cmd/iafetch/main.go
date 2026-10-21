@@ -76,6 +76,7 @@ type options struct {
 	progress         time.Duration
 	base             string
 	backoff          time.Duration
+	stall            time.Duration
 }
 
 func main() {
@@ -90,7 +91,7 @@ func main() {
 }
 
 func parseFlags(args []string) (options, string) {
-	o := options{base: "https://archive.org", backoff: 5 * time.Second}
+	o := options{base: "https://archive.org", backoff: 5 * time.Second, stall: 2 * time.Minute}
 	var tiers, lists, match, include, exclude string
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&o.out, "o", "ia-download", "download to `DIR`/ITEM/FILE")
@@ -109,6 +110,7 @@ func parseFlags(args []string) (options, string) {
 	fs.BoolVar(&o.dryRun, "n", false, "dry run: list the items that would be downloaded, with their size, and stop")
 	fs.BoolVar(&o.status, "status", false, "print what the database records, by tier and state, and stop (LIST.csv not needed)")
 	fs.DurationVar(&o.progress, "progress", time.Minute, "log a progress line this often; 0 for none")
+	fs.DurationVar(&o.stall, "stall", o.stall, "give up on a request, and retry it, when no data arrives for this long; 0 to wait for ever")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), usage, "iafetch")
@@ -248,6 +250,20 @@ type itemRun struct {
 	failed  atomic.Int32
 }
 
+// firstErr keeps the first error set, for any number of goroutines. It
+// was an atomic.Value, whose Store panics when two workers store errors of
+// different types.
+type firstErr struct{ p atomic.Pointer[error] }
+
+func (f *firstErr) set(err error) { f.p.CompareAndSwap(nil, &err) }
+
+func (f *firstErr) get() error {
+	if p := f.p.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
 type stats struct {
 	items, skipped, unavailable, filesDone, filesFailed atomic.Int64
 	bytesDone                                           atomic.Int64
@@ -272,24 +288,30 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 		return fmt.Errorf("%s: %w", csvPath, err)
 	}
 
+	// DefaultTransport's dial, TLS handshake and idle timeouts; the stall
+	// watchdog (client.get) covers the rest
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConnsPerHost = o.jobs + 1
+	tr.ResponseHeaderTimeout = 2 * time.Minute
 	c := &client{
-		http:    &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, MaxIdleConnsPerHost: o.jobs + 1, ResponseHeaderTimeout: 2 * time.Minute}},
+		http:    &http.Client{Transport: tr},
 		base:    strings.TrimRight(o.base, "/"),
 		agent:   versionString("iafetch") + " (https://github.com/go-while/mbox2nntp)",
 		retries: o.retries,
 		backoff: o.backoff,
+		stall:   o.stall,
 	}
 	var st stats
 	jobs := make(chan job, o.jobs)
 	var wg sync.WaitGroup
-	var dbErr atomic.Value
+	var dbErr firstErr
 	for range o.jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
 				if err := work(ctx, c, d, j, &st); err != nil {
-					dbErr.Store(err)
+					dbErr.set(err)
 				}
 			}
 		}()
@@ -302,7 +324,7 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	var queuedBytes int64
 	taken := 0
 	for _, it := range items {
-		if ctx.Err() != nil || dbErr.Load() != nil {
+		if ctx.Err() != nil || dbErr.get() != nil {
 			break
 		}
 		if !o.selected(it) {
@@ -345,8 +367,8 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	}
 	close(jobs)
 	wg.Wait()
-	if e, ok := dbErr.Load().(error); ok {
-		return e
+	if err := dbErr.get(); err != nil {
+		return err
 	}
 	if o.dryRun {
 		fmt.Fprintf(stdout, "%d items, %.2f GB (item sizes from the list); %d skipped as done or unavailable\n",
