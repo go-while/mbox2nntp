@@ -70,7 +70,7 @@ mbox2nntp [flags] -dry-run INPUT
 |---|---|---|
 | `-server HOST:PORT` | (required) | the NNTP server; not needed with `-dry-run` |
 | `-workers N` | `1` | parallel connections |
-| `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked |
+| `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked, in a new `.mbox2nntp-*` directory per run |
 | `-7z PATH` | `7z`, `7zz` or `7za` | the 7-Zip program for `.7z` inputs |
 | `-zstd PATH` | `zstd` | the zstd program for UAT archives |
 | `-xz PATH` | `xz`, else 7-Zip | the xz program for `.usenet.xz` inputs |
@@ -330,7 +330,9 @@ When every article has been answered and none failed, the input is renamed to
 - For a plain `NAME.mbox` with an archive beside it (`NAME.mbox.gz`, `.zip` or `.7z`), the
   archive is renamed instead.
 - A UAT archive (`.usenet`, `.usenet.xz`, `.usenet.7z`) is renamed like an mbox.
-- The copy unpacked into `-tmpdir` is removed after the rename.
+- An archive is unpacked into a new directory in `-tmpdir`, `.mbox2nntp-*`, which is removed
+  at the end of the run, whatever the outcome, and on Ctrl-C. Files already in `-tmpdir`,
+  such as a `NAME.mbox` beside `NAME.mbox.gz`, are never touched.
 - A directory input is never renamed.
 
 An input is **not** marked done when any article ended in an error (or ran out of

@@ -676,6 +676,28 @@ func TestWorkerGivesUpAfterMaxTries(t *testing.T) {
 	}
 }
 
+// The totals are final once worker_done counts the worker: finishFeeding
+// and main read them then. The worker used to count itself done first, and
+// a run could read 0/0, or miss its errors and mark the input done.
+func TestWorkerCountsBeforeDone(t *testing.T) {
+	saved := DRYRUN
+	t.Cleanup(func() { DRYRUN = saved })
+	DRYRUN = true             // ihave answers 235 without a server
+	for i := 0; i < 50; i++ { // each takes a tick of the worker, 100 ms
+		setupWorker(t, "")
+		returned := make(chan bool)
+		go func() { worker(1); close(returned) }()
+		for globalCounter.getCounter("worker_done") != 1 {
+			runtime.Gosched()
+		}
+		sent, total := globalCounter.getCounter("sent"), globalCounter.getCounter("total")
+		<-returned // before the next round replaces the counters
+		if sent != 1 || total != 1 {
+			t.Fatalf("run %d: worker done with sent=%d total=%d, want 1/1", i, sent, total)
+		}
+	}
+}
+
 // needGNUFindSort skips the comparisons with find.sh unless there is a
 // find and a GNU sort to compare with: Windows has no sh and a find.exe of
 // its own, and macOS sort -V is BSD's.
@@ -842,20 +864,59 @@ func testExtractor(t *testing.T, fn func(archive, dst string) error, archive, wa
 }
 
 func TestExtractedPathAndArgPath(t *testing.T) {
-	saved := tmpdir
-	t.Cleanup(func() { tmpdir = saved })
-	for _, tc := range []struct{ tmp, archive, ext, want string }{
-		{".", "x.mbox.gz", ".gz", "x.mbox"},
-		{".", "/abs/dir/x.mbox.zip", ".zip", "x.mbox"},
-		{"/var/tmp/m2n", "/abs/dir/x.mbox.zip", ".zip", "/var/tmp/m2n/x.mbox"},
-		{"/var/tmp/m2n/", "rel/dir/a.(1).mbox.7z", ".7z", "/var/tmp/m2n/a.(1).mbox"},
-		{"/var/tmp/m2n", "x.gz.mbox.gz", ".gz", "/var/tmp/m2n/x.gz.mbox"},
+	savedTmp, savedDir := tmpdir, unpackDir
+	t.Cleanup(func() { tmpdir, unpackDir = savedTmp, savedDir })
+	tmpdir, unpackDir = t.TempDir(), ""
+
+	// the user's own x.mbox next to x.mbox.gz, in tmpdir
+	mine := filepath.Join(tmpdir, "x.mbox")
+	if err := os.WriteFile(mine, []byte("not from the archive"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var dirs []string
+	for _, tc := range []struct{ archive, ext, want string }{
+		{"x.mbox.gz", ".gz", "x.mbox"},
+		{"/abs/dir/x.mbox.zip", ".zip", "x.mbox"},
+		{"rel/dir/a.(1).mbox.7z", ".7z", "a.(1).mbox"},
+		{"x.gz.mbox.gz", ".gz", "x.gz.mbox"},
 	} {
-		tmpdir = tc.tmp
-		if got := extractedPath(tc.archive, tc.ext); got != filepath.FromSlash(tc.want) {
-			t.Errorf("extractedPath(%q, %q) with tmpdir %q = %q, want %q", tc.archive, tc.ext, tc.tmp, got, tc.want)
+		got, err := extractedPath(tc.archive, tc.ext)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := filepath.Dir(got)
+		dirs = append(dirs, dir)
+		if filepath.Base(got) != tc.want || filepath.Dir(dir) != tmpdir || !strings.HasPrefix(filepath.Base(dir), ".mbox2nntp-") {
+			t.Errorf("extractedPath(%q, %q) = %q, want %s in a new directory in tmpdir", tc.archive, tc.ext, got, tc.want)
 		}
 	}
+	if dirs[0] != dirs[3] {
+		t.Errorf("one run, two directories: %q, %q", dirs[0], dirs[3])
+	}
+	// an extractor writes into the run's directory, and the cleanup removes
+	// that directory and nothing else
+	dst, _ := extractedPath("x.mbox.gz", ".gz")
+	if err := unpack.WriteTo(dst, strings.NewReader("from the archive")); err != nil {
+		t.Fatal(err)
+	}
+	removeUnpacked()
+	if got, err := os.ReadFile(mine); err != nil || string(got) != "not from the archive" {
+		t.Errorf("the user's x.mbox: %q, %v", got, err)
+	}
+	if entries, _ := os.ReadDir(tmpdir); len(entries) != 1 {
+		t.Errorf("tmpdir holds %d entries after the cleanup, want only x.mbox", len(entries))
+	}
+	if unpackDir != "" {
+		t.Errorf("unpackDir = %q after the cleanup", unpackDir)
+	}
+	removeUnpacked() // nothing to remove: no-op
+
+	tmpdir = filepath.Join(tmpdir, "missing")
+	if _, err := extractedPath("x.mbox.gz", ".gz"); err == nil {
+		t.Error("tmpdir that does not exist: err = nil")
+	}
+	unpackDir = ""
+
 	for in, want := range map[string]string{"-rf.mbox": "./-rf.mbox", "a.mbox": "a.mbox", "/x/-y": "/x/-y"} {
 		if got := argPath(in); got != want {
 			t.Errorf("argPath(%q) = %q, want %q", in, got, want)

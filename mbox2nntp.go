@@ -30,6 +30,7 @@ import (
 	//"github.com/sam-falvo/mbox-giganews-archive.org-mod"
 	//"github.com/edsrzf/mmap-go"
 	"github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/mboxout"
 	"github.com/go-while/mbox2nntp/internal/unpack"
 	"github.com/go-while/mbox2nntp/internal/version"
 	tsm_GlobalBools "github.com/go-while/mbox2nntp/tsm/GlobalBools" // package is tsm_globalbools; alias keeps existing call sites
@@ -406,22 +407,60 @@ func verOrder(c byte) int {
 
 func isDigit(c byte) bool { return c >= '0' && c <= '9' }
 
-// extractedPath is where an archive's mbox is unpacked to: tmpdir, under
-// the archive's base name without ext. Every extractor writes there.
-func extractedPath(archive, ext string) string {
-	return filepath.Join(tmpdir, strings.TrimSuffix(filepath.Base(archive), ext))
+// unpackDir is this run's own directory for unpacked archives, a new one in
+// tmpdir. Unpacking straight to tmpdir/NAME overwrote, and then removed, a
+// file that was already there: the user's own x.mbox next to x.mbox.gz with
+// the default tmpdir ".", or the copy of another run sharing tmpdir.
+var unpackDir string
+
+// extractedPath is where an archive's mbox is unpacked to: unpackDir, made
+// on the first call, under the archive's base name without ext. The zip
+// and 7z extractors look for an entry of that name.
+func extractedPath(archive, ext string) (string, error) {
+	if unpackDir == "" {
+		dir, err := os.MkdirTemp(tmpdir, ".mbox2nntp-*")
+		if err != nil {
+			return "", err
+		}
+		mboxout.AddTemp(dir) // removed on SIGINT and SIGTERM too
+		unpackDir = dir
+	}
+	return filepath.Join(unpackDir, strings.TrimSuffix(filepath.Base(archive), ext)), nil
 }
 
-// unpackOrExit runs fn to extract archive to dst, and exits on failure. The
-// extractors overwrite dst: a file left by an interrupted run may be
-// truncated, and must not be imported in place of the real one.
-func unpackOrExit(kind string, fn func(archive, dst string) error, archive, dst string) {
+// removeUnpacked removes unpackDir, if this run made one.
+func removeUnpacked() {
+	if unpackDir == "" {
+		return
+	}
+	log.Printf("cleanup: rm -r '%s'", unpackDir)
+	mboxout.RemoveTemp(unpackDir)
+	unpackDir = ""
+}
+
+// exit removes what this run unpacked, then exits. It takes the lock of
+// mboxout's temporary-file list and keeps it, so it is safe from any
+// goroutine.
+func exit(code int) {
+	mboxout.RemoveTemps()
+	os.Exit(code)
+}
+
+// unpackOrExit runs fn to extract archive, without ext, into unpackDir and
+// returns the path; it exits on failure.
+func unpackOrExit(kind string, fn func(archive, dst string) error, archive, ext string) string {
+	dst, err := extractedPath(archive, ext)
+	if err != nil {
+		log.Printf("%s failed mboxfile='%s' err='%v' =exit(1)", kind, archive, err)
+		exit(1)
+	}
 	log.Printf("%s %s to %s", kind, archive, dst)
 	if err := fn(archive, dst); err != nil {
 		log.Printf("%s failed mboxfile='%s' err='%v' =exit(1)", kind, archive, err)
-		os.Remove(dst)
-		os.Exit(1)
+		removeUnpacked()
+		exit(1)
 	}
+	return dst
 }
 
 // gunzipTo decompresses archive to dst in-process. It used to run gzip, or
@@ -469,7 +508,7 @@ func rmmbox(mboxfile string) {
 	err := os.Remove(mboxfile)
 	if err != nil {
 		log.Printf("rmmbox failed mboxfile='%s' err='%v'", mboxfile, err)
-		os.Exit(1)
+		exit(1)
 	}
 	log.Printf("cleanup mboxfile='%s' err='%v'", mboxfile, err)
 } // end func rmmbox
@@ -531,7 +570,7 @@ func dos2unix(mboxfile string) {
 	err := cmd.Run()
 	if err != nil {
 		log.Printf("dos2unix failed mboxfile='%s' err='%v'", mboxfile, err)
-		os.Exit(1)
+		exit(1)
 	}
 } // end func dos2unix
 
@@ -544,7 +583,7 @@ func mvmbox(mboxfile string) {
 	err := os.Rename(mboxfile, mmboxfile)
 	if err != nil {
 		log.Printf("mvmbox failed mboxfile='%s' err='%v'", mboxfile, err)
-		os.Exit(1)
+		exit(1)
 	} else {
 		log.Printf("OK mvmbox: '%s'", mmboxfile)
 	}
@@ -802,10 +841,11 @@ func main() {
 	}
 	log.Printf("%s", version.String("mbox2nntp"))
 	opts.apply()
+	mboxout.RemoveTempsOnSignal() // what was unpacked goes on Ctrl-C too
 	mboxfile := opts.input
 	if !fileExists(mboxfile) && !dirExists(mboxfile) {
 		log.Printf("ERROR: input not found '%s'", mboxfile)
-		os.Exit(1)
+		exit(1)
 	}
 	log.Printf("server=%s DRYRUN=%t DROPBINARY=%t dos2unix=%q nodos2unix=%t prehash=%t laxmid=%t timeout=%v max-tries=%d",
 		nntpserv, DRYRUN, DROPBINARY, DOS2UNIX, NODOS2UNIX, PREHASH_MODE, LAXMID, NNTP_TIMEOUT, MAX_TRIES)
@@ -848,11 +888,11 @@ func main() {
 		ok, err := isMboxText(mboxfile)
 		if err != nil {
 			log.Printf("ERROR: %v", err)
-			os.Exit(1)
+			exit(1)
 		}
 		if !ok {
 			log.Printf("file %s is not an mbox: a .txt input must begin with a \"From \" line", mboxfile)
-			os.Exit(1)
+			exit(1)
 		}
 		is_bag = true
 
@@ -862,14 +902,14 @@ func main() {
 	} else if strings.HasSuffix(mboxfile, "/") {
 		if !dirExists(mboxfile) {
 			log.Printf("ERROR: dir not found '%s'", mboxfile)
-			os.Exit(1)
+			exit(1)
 		}
 		is_dir = true
 	}
 
 	if !is_mbx && !is_gzp && !is_zip && !is_zip7 && !is_dir && !is_bag && uatsuffix == "" {
 		log.Printf("file %s is not an mboxfile?", mboxfile)
-		os.Exit(1)
+		exit(1)
 	}
 
 	// -dos2unix runs on every mbox (not on a directory). Look it up now,
@@ -879,7 +919,7 @@ func main() {
 		path, err := exec.LookPath(DOS2UNIX)
 		if err != nil {
 			log.Printf("ERROR: -dos2unix: %v", err)
-			os.Exit(1)
+			exit(1)
 		}
 		DOS2UNIX = path
 	} else if NODOS2UNIX && DOS2UNIX == "" {
@@ -907,8 +947,9 @@ func main() {
 	} else {
 		mboxfile = proc(mboxfile, is_zip, is_zip7, is_gzp, is_mbx, is_dir, is_bag)
 	}
-	// an archive was unpacked into tmpdir: mboxfile is that copy
-	unpacked := is_zip || is_zip7 || is_gzp || uatsuffix == ".usenet.xz" || uatsuffix == ".usenet.7z"
+	// an archive was unpacked into unpackDir: mboxfile is that copy, and it
+	// goes with unpackDir at the end, whatever the outcome
+	defer removeUnpacked()
 	if is_dir {
 		globalBools.SetGB("feeder_done", true)
 		for {
@@ -934,22 +975,11 @@ func main() {
 	log.Printf("END: mboxfile='%s' took=%d remaining sent=%d", mboxfile, took, tsentcnt)
 
 	if DRYRUN {
-		// nothing was sent, so nothing is done: only remove what was unpacked
-		if unpacked && fileExists(mboxfile) {
-			log.Printf("cleanup: rm '%s'", mboxfile)
-			rmmbox(mboxfile)
-		}
+		// nothing was sent, so nothing is done
 		log.Printf("dry run: '%s' not marked done", mboxfileZ)
 	} else if is_zip || is_zip7 || is_gzp || is_bag || uatsuffix != "" {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)
-			// proc returned the extracted file's path. Only an archive has
-			// one: for a .bag it is the source itself, which the old
-			// tmpdir+"/"+name check removed whenever the run was not done.
-			if unpacked && fileExists(mboxfile) {
-				log.Printf("cleanup: rm '%s'", mboxfile)
-				rmmbox(mboxfile)
-			}
 		}
 	} else if is_mbx {
 		if !mboxhasZ(mboxfile) {
@@ -978,35 +1008,32 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 
 	} else if is_zip {
 		// mbox is zip
-		mboxfiletrim = extractedPath(mboxfile, ".zip")
-		unpackOrExit("unzip", unzipTo, mboxfile, mboxfiletrim)
+		mboxfiletrim = unpackOrExit("unzip", unzipTo, mboxfile, ".zip")
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
-			os.Exit(1)
+			exit(1)
 		}
 		log.Printf("unzipped '%s' to '%s'", mboxfile, mboxfiletrim)
 		reader, src = openMboxFile(mboxfiletrim)
 
 	} else if is_gzp {
 		// mbox is gzip
-		mboxfiletrim = extractedPath(mboxfile, ".gz")
-		unpackOrExit("gunzip", gunzipTo, mboxfile, mboxfiletrim)
+		mboxfiletrim = unpackOrExit("gunzip", gunzipTo, mboxfile, ".gz")
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("gunzipped '%s' but not found '%s'", mboxfile, mboxfiletrim)
-			os.Exit(1)
+			exit(1)
 		}
 		log.Printf("gunzipped '%s' to '%s'", mboxfile, mboxfiletrim)
 		reader, src = openMboxFile(mboxfiletrim)
 	} else if is_zip7 {
 		// mbox is 7z
-		mboxfiletrim = extractedPath(mboxfile, ".7z")
-		unpackOrExit("un7z", unpack.Un7zTo, mboxfile, mboxfiletrim)
+		mboxfiletrim = unpackOrExit("un7z", unpack.Un7zTo, mboxfile, ".7z")
 		dos2unix(mboxfiletrim)
 		if !fileExists(mboxfiletrim) {
 			log.Printf("unzipped 7z '%s' but not found '%s'", mboxfile, mboxfiletrim)
-			os.Exit(1)
+			exit(1)
 		}
 		log.Printf("unzipped 7z '%s' to '%s'", mboxfile, mboxfiletrim)
 		reader, src = openMboxFile(mboxfiletrim)
@@ -1040,7 +1067,7 @@ func proc(mboxfile string, is_zip bool, is_zip7 bool, is_gzp bool, is_mbx bool, 
 		return mboxfile
 	} else {
 		log.Printf("proc mboxfile failed unknown error")
-		os.Exit(1)
+		exit(1)
 	}
 
 	//iterateMbox(reader, srvtp)
@@ -1140,7 +1167,7 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	fh, err := os.Open(mboxfile)
 	if err != nil {
 		log.Printf("Can't os.Open file %s", mboxfile)
-		os.Exit(1)
+		exit(1)
 	}
 	if fi, err := fh.Stat(); err == nil && fi.Size() == 0 {
 		log.Printf("openMboxFile: empty file '%s', nothing to import", mboxfile)
@@ -1152,7 +1179,7 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	mboxReader, err := mbox.CreateMboxStream(src)
 	if err != nil {
 		log.Printf("Can't create mbox reader: %#v", err)
-		os.Exit(1)
+		exit(1)
 	}
 	return mboxReader, src
 }
@@ -1424,13 +1451,10 @@ loop_worker:
 						globalCounter.subCounter(wid, "msgnums", 1)
 					}
 					time.Sleep(retryDelay)
+					// counted before the replacement starts: it may finish,
+					// and finishFeeding read the totals, before this returns
+					addWorkerCounts(wid, wsentcnt, wtot, wnntpdup435, wnntp437, werrcnt, wnntp999)
 					go worker(wid)
-					globalCounter.addCounter(wid, "sent", wsentcnt)
-					globalCounter.addCounter(wid, "total", wtot)
-					globalCounter.addCounter(wid, "wnntpdup435", wnntpdup435)
-					globalCounter.addCounter(wid, "wnntperr437", wnntp437)
-					globalCounter.addCounter(wid, "wnntperrcnt", werrcnt)
-					globalCounter.addCounter(wid, "tnntp999", wnntp999)
 					return
 				}
 				time.Sleep(retryDelay) // 436: server busy or throttled
@@ -1457,17 +1481,24 @@ loop_worker:
 	} // end for
 	//globalCounter.subCounter(wid, "msgnums", wcnt)
 	closeBackend(srvtp, cliwriter)
+	// the counts first: finishFeeding and main read the totals as soon as
+	// every worker is done. In the other order they could read them before
+	// the last worker's counts were in, as 0/0 or, worse, with its errors
+	// missing, and mark the input done.
+	addWorkerCounts(wid, wsentcnt, wtot, wnntpdup435, wnntp437, werrcnt, wnntp999)
 	globalCounter.incCounter(wid, "worker_done")
 	log.Printf("Done Worker %d) totalWdone=%d maxW=%d wtot=%d sent=%d e435=%d e437=%d errcnt=%d filter=%d", wid, globalCounter.getCounter("worker_done"), MaxWorkers, wtot, wsentcnt, wnntpdup435, wnntp437, werrcnt, wnntp999)
-	globalCounter.addCounter(wid, "sent", wsentcnt)
-	globalCounter.addCounter(wid, "total", wtot)
-	globalCounter.addCounter(wid, "wnntpdup435", wnntpdup435)
-	globalCounter.addCounter(wid, "wnntperr437", wnntp437)
-	globalCounter.addCounter(wid, "wnntperrcnt", werrcnt)
-	globalCounter.addCounter(wid, "tnntp999", wnntp999)
-
-	return
 } // end func worker
+
+// addWorkerCounts adds one worker's counts to the totals.
+func addWorkerCounts(wid, sent, total, dup435, err437, errcnt, filter999 int) {
+	globalCounter.addCounter(wid, "sent", sent)
+	globalCounter.addCounter(wid, "total", total)
+	globalCounter.addCounter(wid, "wnntpdup435", dup435)
+	globalCounter.addCounter(wid, "wnntperr437", err437)
+	globalCounter.addCounter(wid, "wnntperrcnt", errcnt)
+	globalCounter.addCounter(wid, "tnntp999", filter999)
+}
 
 func isspace(b byte) bool {
 	return b < 33

@@ -2,7 +2,6 @@ package main
 
 import (
 	"log"
-	"os"
 	"sort"
 	"strings"
 
@@ -24,31 +23,27 @@ func uatSuffix(input string) string {
 
 // procUAT feeds the articles of a UAT archive to the workers, like proc
 // does for an mbox, and returns the .usenet file it read: for .xz and .7z
-// the copy unpacked into tmpdir, which main removes after the archive is
-// marked done. Each message goes through uat.Fix, which declares its
-// UTF-8 body and re-encodes non-ASCII header fields; see package uat.
+// the copy unpacked into unpackDir, which main removes at the end. Each
+// message goes through uat.Fix, which declares its UTF-8 body and
+// re-encodes non-ASCII header fields; see package uat.
 func procUAT(input, suffix string) string {
 	zstd, err := unpack.FindZstd() // before anything is unpacked
 	if err != nil {
 		log.Printf("ERROR: %v", err)
-		os.Exit(1)
+		exit(1)
 	}
 	path := input
 	switch suffix {
 	case ".usenet.xz":
-		path = extractedPath(input, ".xz")
-		unpackOrExit("unxz", unpack.UnXzTo, input, path)
+		path = unpackOrExit("unxz", unpack.UnXzTo, input, ".xz")
 	case ".usenet.7z":
-		path = extractedPath(input, ".7z")
-		unpackOrExit("un7z", unpack.Un7zTo, input, path)
+		path = unpackOrExit("un7z", unpack.Un7zTo, input, ".7z")
 	}
 	p, err := uat.Open(path)
 	if err != nil {
 		log.Printf("ERROR: %v =exit(1)", err)
-		if path != input {
-			os.Remove(path)
-		}
-		os.Exit(1)
+		removeUnpacked()
+		exit(1)
 	}
 	defer p.Close() // before main renames or removes it
 	log.Printf("[procUAT] '%s' group='%s' version=%d messages=%d", path, p.Name, p.Version, p.Count())
