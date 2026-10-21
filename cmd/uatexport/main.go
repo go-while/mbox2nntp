@@ -136,7 +136,9 @@ func export(input string, o options) (st stats, err error) {
 	}
 	defer p.Close()
 	st.group = p.Name
-	if st.group == "" {
+	if !safeName(st.group) {
+		// the name comes from the archive: "../x" or "/etc/x" would put the
+		// default output anywhere
 		st.group = strings.TrimSuffix(filepath.Base(path), ".usenet")
 	}
 	st.out = o.out
@@ -181,6 +183,21 @@ func export(input string, o options) (st stats, err error) {
 		return st, err
 	}
 	return st, w.close()
+}
+
+// safeName reports whether name, a group name from an archive, is fit for
+// a file name in the current directory: one path element, not hidden, and
+// no control characters.
+func safeName(name string) bool {
+	if name == "" || name[0] == '.' || !filepath.IsLocal(name) || strings.ContainsAny(name, `/\:`) {
+		return false
+	}
+	for _, c := range name {
+		if c < ' ' || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // A writer writes under a temporary name. close renames the output to its

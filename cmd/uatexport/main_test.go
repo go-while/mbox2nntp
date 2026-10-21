@@ -225,3 +225,43 @@ func TestExportFails(t *testing.T) {
 		}
 	}
 }
+
+// The default output is named after the archive's group name only when that
+// is a plain file name: it comes from the archive. Review #7: the name
+// "../../escaped" wrote ../../escaped.mbox.
+func TestExportUnsafeName(t *testing.T) {
+	zstd := uattest.Zstd(t)
+	root := t.TempDir()
+	deep := filepath.Join(root, "a", "b", "c")
+	work := filepath.Join(root, "x", "y", "z")
+	os.MkdirAll(deep, 0755)
+	os.MkdirAll(work, 0755)
+	// the archive's name field is "../../escaped"; the file lands in root/a
+	in := uattest.Write(t, zstd, deep, "../../escaped", "", msgs)
+	t.Chdir(work)
+	st, err := export(in, options{format: "mbox"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.out != "escaped.mbox" {
+		t.Errorf("output %q, want escaped.mbox in the current directory", st.out)
+	}
+	if _, err := os.Stat(filepath.Join(work, "escaped.mbox")); err != nil {
+		t.Error(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "x", "escaped.mbox")); err == nil {
+		t.Error("wrote ../../escaped.mbox")
+	}
+}
+
+func TestSafeName(t *testing.T) {
+	for name, want := range map[string]bool{
+		"pl.comp.os.linux": true, "alt.fan.x-y_z+1": true, "a..b": true,
+		"": false, ".": false, "..": false, ".hidden": false, "../x": false, "/abs": false,
+		"a/b": false, `a\b`: false, "c:x": false, "x\ny": false, "x\x7f": false,
+	} {
+		if got := safeName(name); got != want {
+			t.Errorf("safeName(%q) = %t, want %t", name, got, want)
+		}
+	}
+}
