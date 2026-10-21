@@ -198,10 +198,10 @@ func check(f iaFile, n int64, h hash.Hash) error {
 	return nil
 }
 
-// download fetches a file of an item to path, through path.part, which a
-// later run resumes. The file appears under its name only when its size
-// and md5 match the metadata.
-func (c *client) download(ctx context.Context, id string, f iaFile, path string) error {
+// download fetches a file of an item to path, through part (see partName),
+// which a later run resumes. The file appears under its name only when its
+// size and md5 match the metadata.
+func (c *client) download(ctx context.Context, id string, f iaFile, path, part string) error {
 	if _, err := os.Stat(path); err == nil {
 		// Left by an earlier run that stopped before recording it, or put
 		// there by hand: keep it if it is the right file.
@@ -213,13 +213,25 @@ func (c *client) download(ctx context.Context, id string, f iaFile, path string)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return permanentError{err}
 	}
-	part := path + ".part"
 	u := c.base + "/download/" + url.PathEscape(id) + "/" + escapePath(f.Name)
 	err := c.retry(ctx, id+"/"+f.Name, func() error { return c.fetchPart(ctx, u, part, f) })
 	if err != nil {
 		return err
 	}
 	return os.Rename(part, path)
+}
+
+// partName is the file path is downloaded through: path.part, unless that
+// is the path of another file of the item (taken), which it would have
+// overwritten, and then renamed away, after that file was recorded done;
+// then path.part.1, .2, ... taken holds the item's paths in lower case,
+// for file systems that ignore case.
+func partName(path string, taken map[string]bool) string {
+	part := path + ".part"
+	for i := 1; taken[strings.ToLower(part)]; i++ {
+		part = fmt.Sprintf("%s.part.%d", path, i)
+	}
+	return part
 }
 
 func escapePath(name string) string {
@@ -245,7 +257,9 @@ func (c *client) fetchPart(ctx context.Context, u, part string, f iaFile) error 
 		return err
 	}
 	if f.Size >= 0 && have > f.Size {
+		// longer than the file: start over, md5 and all
 		have = 0
+		h.Reset()
 	}
 	if f.Size >= 0 && have == f.Size {
 		if err := check(f, have, h); err != nil {

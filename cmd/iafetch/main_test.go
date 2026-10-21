@@ -368,3 +368,69 @@ func TestStatusAndDryRun(t *testing.T) {
 		t.Errorf("status output:\n%s", s)
 	}
 }
+
+// Review #9: an item with files "x" and "x.part". x was downloaded through
+// x.part, overwriting the finished x.part and renaming it away while the
+// database had it done.
+func TestPartNamedLikeAnotherFile(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	files := map[string][]byte{
+		"x":        bytes.Repeat([]byte("x"), 3000),
+		"x.part":   bytes.Repeat([]byte("p"), 2000),
+		"x.part.1": bytes.Repeat([]byte("1"), 1000),
+	}
+	fake.items["it"] = files
+	o.jobs = 3 // all at once
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range files {
+		if got, err := os.ReadFile(filepath.Join(o.out, "it", name)); err != nil || !bytes.Equal(got, want) {
+			t.Errorf("%s: %d bytes, %v; want its own %d bytes", name, len(got), err, len(want))
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(o.out, "it", "*.part.*")); len(left) != 1 { // x.part.1 itself
+		t.Errorf("left %q", left)
+	}
+}
+
+func TestPartName(t *testing.T) {
+	taken := map[string]bool{"/d/it/x": true, "/d/it/x.part": true, "/d/it/x.part.1": true, "/d/it/y": true, "/d/it/z.part": true}
+	for path, want := range map[string]string{
+		"/d/it/x": "/d/it/x.part.2",
+		"/d/it/y": "/d/it/y.part",
+		"/d/it/Z": "/d/it/Z.part.1", // case-insensitive file systems
+	} {
+		if got := partName(path, taken); got != want {
+			t.Errorf("partName(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// Review #10: a .part longer than the file was started over without
+// resetting the md5, so the first try always failed its check.
+func TestOversizedPart(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789"), 1000)
+	fake.items["it"] = map[string][]byte{"big": content}
+	o.retries = 0 // the first try has to be right
+	os.MkdirAll(filepath.Join(o.out, "it"), 0o755)
+	if err := os.WriteFile(filepath.Join(o.out, "it", "big.part"), append(content, "and more"...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+	n := 0
+	for _, r := range fake.reset() {
+		if r == "/download/it/big" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("%d downloads, want 1", n)
+	}
+}

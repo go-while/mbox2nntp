@@ -235,9 +235,9 @@ func (o options) wantFile(name string) bool {
 
 // job is one file to download; itemRun tracks the files of its item.
 type job struct {
-	run  *itemRun
-	file iaFile
-	path string
+	run        *itemRun
+	file       iaFile
+	path, part string
 }
 
 type itemRun struct {
@@ -401,6 +401,13 @@ func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs ch
 		return err
 	}
 	r := &itemRun{item: it, files: len(files), bytes: bytes}
+	// every file of the item, so that no .part is named like one of them
+	taken := map[string]bool{}
+	for _, f := range m.Files {
+		if p, err := localPath(o.out, it.ID, f); err == nil {
+			taken[strings.ToLower(p)] = true
+		}
+	}
 	var todo []job
 	for _, f := range files {
 		if done[f.Name] {
@@ -410,7 +417,7 @@ func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs ch
 		if err != nil {
 			return err
 		}
-		todo = append(todo, job{run: r, file: f, path: p})
+		todo = append(todo, job{run: r, file: f, path: p, part: partName(p, taken)})
 	}
 	if len(todo) == 0 {
 		st.items.Add(1)
@@ -432,7 +439,7 @@ func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs ch
 // the item. Only database errors are returned; they stop the run.
 func work(ctx context.Context, c *client, d *db, j job, st *stats) error {
 	r := j.run
-	err := c.download(ctx, r.item.ID, j.file, j.path)
+	err := c.download(ctx, r.item.ID, j.file, j.path, j.part)
 	if err == nil {
 		if err := d.fileDone(r.item.ID, j.file, j.path); err != nil {
 			return err
