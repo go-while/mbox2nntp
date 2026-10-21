@@ -12,7 +12,8 @@ import (
 // gna-clari, usenet-clari and akita-inu corpus as well (10,555,466
 // comparisons, lax and strict, none different). The strict columns have
 // since changed: the original rejected every Message-ID in strict mode,
-// and now one in <> with an "@" and no space passes.
+// and now one in <> with an "@" and no space passes. So have the cases
+// marked "changed", listed in headers.go.
 func TestParseHeaderKeysAsOverview(t *testing.T) {
 	w := log.Writer()
 	log.SetOutput(io.Discard)
@@ -42,14 +43,25 @@ func TestParseHeaderKeysAsOverview(t *testing.T) {
 		{[]string{"Subject: x", "Message-ID: "}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID:", " <a@b>"}, "<a@b>", true, "<a@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <a@", " b>"}, "<a@ b>", true, "", false, 2},
-		{[]string{"Subject: x", "Message-ID: <a@b>", "Message-ID: <c@d>"}, "<a@b> <c@d>", true, "", false, 3},
+		{[]string{"Subject: x", "Message-ID: <a@b>", "Message-ID: <c@d>"}, "<a@b>", true, "<a@b>", true, 3}, // changed: was "<a@b> <c@d>"
 		{[]string{"Subject: a", "\tcontinued", "Message-ID: <a@b>", "Path: x"}, "<a@b>", true, "<a@b>", true, 3},
 		{[]string{"\tleading continuation", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "no colon", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", ":no key", "Message-ID: <a@b>"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "x", "Message-ID: <a@b>"}, "", false, "", false, 0},
-		{[]string{"Subject: x", "", "Message-ID: <a@b>"}, "", false, "", false, 0},
-		{[]string{"Subject: x", "Message-ID: <a@b>", ""}, "", false, "", false, 0},
+		{[]string{"Subject: x", "", "Message-ID: <a@b>"}, "<a@b>", true, "<a@b>", true, 2}, // changed: a blank continuation failed the header
+		{[]string{"Subject: x", "Message-ID: <a@b>", ""}, "<a@b>", true, "<a@b>", true, 2}, // changed, as above
+		// changed: the first Message-ID field, whatever its spelling, and
+		// only its own continuation lines
+		{[]string{"Subject: x", "Message-Id: <a@b>", "Message-ID: <c@d>"}, "<a@b>", true, "<a@b>", true, 3},
+		{[]string{"Subject: x", "MESSAGE-ID: <c@d>", "Message-Id: <a@b>"}, "<c@d>", true, "<c@d>", true, 3},
+		{[]string{"Subject: x", "Message-ID:", " <a@b>", "Message-ID: <c@d>"}, "<a@b>", true, "<a@b>", true, 3},
+		{[]string{"Subject: x", "Message-ID: <a@b>", "Message-ID: <a@b>"}, "<a@b>", true, "<a@b>", true, 3},
+		// changed: several IDs in one field, the first in lax mode
+		{[]string{"Subject: x", "Message-ID: <a@b> <c@d>"}, "<a@b>", true, "", false, 2},
+		{[]string{"Subject: x", "Message-ID: <a@b><c@d>"}, "<a@b>", true, "", false, 2},
+		// changed: continuation lines of only spaces are skipped
+		{[]string{"Subject: x", " ", "\t", "Message-ID:", "  ", " <a@b>"}, "<a@b>", true, "<a@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <a@b>", "\tlast continuation"}, "", false, "", false, 0},
 		{[]string{"Subject: x", "Message-ID: <msgid@b>"}, "<msgid@b>", true, "<msgid@b>", true, 2},
 		{[]string{"Subject: x", "Message-ID: <msgid>"}, "<msgid>", true, "", false, 2},

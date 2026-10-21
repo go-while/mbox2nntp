@@ -1008,8 +1008,23 @@ func TestRewriteHead(t *testing.T) {
 			[]string{"Subject: a b c"}, nil, 0},
 		{"Path gets the prefix", with("Subject: s", "Path: a!b"),
 			[]string{"Path: mbox2nntp" + my_mboxfile + "!a!b"}, nil, 0},
+		// review #3: a dropped field went without its continuation lines,
+		// which were then joined to the field kept before it
+		{"folded Message-ID", []string{"From: a@b.invalid", "Date: Mon, 30 Jun 2003 23:33:23 GMT", "Subject: hello", "Message-ID:", " <rh@test>"},
+			[]string{"Subject: hello", "Message-ID: <rh@test>"}, []string{" <rh@test>", "Message-ID:"}, 0},
+		{"second Message-ID, folded", with("Subject: s", "Message-ID:", " <other@test>"),
+			[]string{"Message-ID: <rh@test>"}, []string{" <other@test>"}, 0},
+		{"folded Expires", with("Subject: s", "Expires: Mon, 30 Jun", " 2003 23:33:23 GMT"),
+			nil, []string{" 2003 23:33:23 GMT", "Expires: Mon, 30 Jun"}, 0},
+		{"no colon, folded", with("Subject: s", "garbage line", " its continuation"),
+			nil, []string{"garbage line", " its continuation"}, 0},
 		{"no Date", []string{"Subject: s", "Message-ID: <rh@test>"}, nil, nil, 437},
 		{"no Subject", base, nil, nil, 437},
+	}
+	// the reviewer's example, whole: nothing joined to Subject
+	got, _, _ := rewriteHead("<rh@test>", []string{"From: a@b.invalid", "Subject: hello", "Message-ID:", " <rh@test>", "Date: Mon, 30 Jun 2003 23:33:23 GMT"})
+	if want := []string{"From: a@b.invalid", "Subject: hello", "Date: Mon, 30 Jun 2003 23:33:23 GMT", "Message-ID: <rh@test>"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("folded Message-ID: %q\nwant %q", got, want)
 	}
 	for _, tc := range cases {
 		got, _, code := rewriteHead("<rh@test>", tc.head)

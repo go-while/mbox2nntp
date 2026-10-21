@@ -2,10 +2,19 @@ package main
 
 // ParseHeaderKeys and GetMessageID are copied from
 // github.com/go-while/nntp-overview v0.0.0-20250520152009-98ae78251105
-// (overview.go), unchanged apart from the strict-mode fix in GetMessageID.
-// They were the only code mbox2nntp used from that package, which pulls in
-// nntp-storage, nntp-mmap, mysql and redis, and does not build on Windows. TestParseHeaderKeysAsOverview holds the copy to the
-// original's recorded behaviour, strict mode excepted.
+// (overview.go). They were the only code mbox2nntp used from that package,
+// which pulls in nntp-storage, nntp-mmap, mysql and redis, and does not
+// build on Windows. TestParseHeaderKeysAsOverview holds the copy to the
+// original's recorded behaviour, except for these changes:
+//   - GetMessageID's strict mode tested the literal "msgid" for "@"; it
+//     also rejects "<" or ">" inside the ID now
+//   - the Message-ID comes from the first Message-ID field and its own
+//     continuation lines. The original joined every value of the key, so
+//     two Message-ID fields gave "<a@b> <a@b>", which lax mode took for one
+//     ID; and with fields spelled differently ("Message-ID", "Message-Id")
+//     map order picked one at random.
+//   - lax mode cuts a field holding several IDs, "<a@b> <c@d>", to the first
+//   - a continuation line of only spaces is skipped; it failed the header
 
 import (
 	"fmt"
@@ -39,7 +48,12 @@ func ParseHeaderKeys(head []string, laxmid bool) (headermap map[string][]string,
 	headermap = make(map[string][]string)
 	keysorder = []string{}
 	ignore_nextline := false
+	var msgidParts []string // the first Message-ID field, with its continuation lines
+	inMsgid := false
 	for i, line := range head {
+		if i > 0 && strings.TrimSpace(line) == "" {
+			continue // a continuation line of only spaces: nothing to add
+		}
 		if len(line) < 2 {
 			log.Printf("WARN Error ParseHeaderKeys: Header attribute expected i=%d head=%d line='%s'", i, len(head), line)
 			return nil, nil, "", fmt.Errorf("Error ParseHeaderKeys: Header attribute expected i=%d head=%d line='%s'", i, len(head), line)
@@ -64,6 +78,9 @@ func ParseHeaderKeys(head []string, laxmid bool) (headermap map[string][]string,
 
 		if isspace(line[0]) && key != "" {
 			headermap[key] = append(headermap[key], line)
+			if inMsgid {
+				msgidParts = append(msgidParts, line)
+			}
 			continue
 		} else if isspace(line[0]) && key == "" {
 			return nil, nil, "", fmt.Errorf("Error ParseHeaderKeys: Unexpected continuation of a header somehow missed line='%s' i=%d head=%d key='%s'", line, i, len(head), key)
@@ -75,6 +92,10 @@ func ParseHeaderKeys(head []string, laxmid bool) (headermap map[string][]string,
 
 		key = string(line[0:k])
 		value := string(line[k+1:])
+		inMsgid = msgidParts == nil && strings.EqualFold(key, "message-id")
+		if inMsgid {
+			msgidParts = []string{value}
+		}
 
 		/*
 			for j, c := range value {
@@ -98,27 +119,19 @@ func ParseHeaderKeys(head []string, laxmid bool) (headermap map[string][]string,
 		keysorder = append(keysorder, key)
 	}
 	msgid_key := ""
-
-	for key, values := range headermap {
-		if strings.ToLower(key) == "message-id" {
-			if len(values) > 0 {
-				if len(values) > 1 {
-					msgid = strings.TrimSpace(strings.Join(values, ""))
-				} else {
-					msgid = values[0]
-				}
-
-				msgid_key = key
-				if msgid != "" {
-					msgid, err = GetMessageID(msgid, laxmid)
-					if err != nil || msgid == "" {
-						return nil, nil, "", fmt.Errorf("Error ParseHeaderKeys getMessageID key='%s' val='%#v'", key, values)
-					}
-					break
-				}
-			} else {
-				log.Printf("Error ParseHeaderKeys getMessageID key='%s' no value", key)
+	if msgidParts != nil {
+		// unfolded: a Message-ID holds no white space, so the parts join
+		// without it
+		msgid = strings.TrimSpace(strings.Join(msgidParts, ""))
+		for _, k := range keysorder {
+			if strings.EqualFold(k, "message-id") {
+				msgid_key = k
+				break
 			}
+		}
+		msgid, err = GetMessageID(msgid, laxmid) // an empty one is an error too
+		if err != nil || msgid == "" {
+			return nil, nil, "", fmt.Errorf("Error ParseHeaderKeys getMessageID key='%s' val='%#v'", msgid_key, msgidParts)
 		}
 	}
 
@@ -134,6 +147,12 @@ func ParseHeaderKeys(head []string, laxmid bool) (headermap map[string][]string,
 func GetMessageID(amsgid string, laxmid bool) (string, error) {
 	//lastInd := -1
 	msgid := strings.TrimSpace(amsgid)
+	if laxmid && strings.HasPrefix(msgid, "<") {
+		// several IDs in one field, "<a@b> <c@d>" or "<a@b><c@d>": the first
+		if j := strings.Index(msgid, ">"); j > 0 && strings.HasPrefix(strings.TrimLeft(msgid[j+1:], " \t"), "<") {
+			msgid = msgid[:j+1]
+		}
+	}
 	containsSpace := strings.Contains(msgid, " ")
 	//containsAT := strings.Contains(msgid, "@")
 
@@ -162,7 +181,9 @@ func GetMessageID(amsgid string, laxmid bool) (string, error) {
 	} else if !laxmid {
 		// The original tested the literal "msgid" for the "@", so without
 		// laxmid it accepted nothing.
-		if strings.HasPrefix(msgid, "<") && strings.Contains(msgid, "@") && strings.HasSuffix(msgid, ">") {
+		// and no "<" or ">" inside, which takes "<a@b><c@d>" for one ID
+		if strings.HasPrefix(msgid, "<") && strings.Contains(msgid, "@") && strings.HasSuffix(msgid, ">") &&
+			!strings.ContainsAny(msgid[1:len(msgid)-1], "<>") {
 			return msgid, nil
 		}
 	}

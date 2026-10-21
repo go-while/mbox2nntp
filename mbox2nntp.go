@@ -1687,9 +1687,11 @@ func isBadDateLine(line string) bool {
 }
 
 // rewriteHead turns a parsed article's header lines into the ones IHAVE
-// sends: Path gets our prefix, Xref/Expires/"From " lines and their
-// continuations are dropped, Message-ID is reduced to the one being fed,
-// colon-space is repaired. code is 0, or 437 when Subject or Date is missing.
+// sends: Path gets our prefix, Xref/Expires/"From " lines and lines without
+// a colon are dropped, Message-ID is reduced to the one being fed,
+// colon-space is repaired. A dropped field goes with its continuation
+// lines: kept, they would have been joined to the field before it. code is
+// 0, or 437 when Subject or Date is missing.
 func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bool, code int) {
 	has_hdr_date := false
 
@@ -1793,6 +1795,9 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 			} else
 			// check headers
 			if header_key_L == "message-id" {
+				// every Message-ID field goes, folded or not; the one fed
+				// is added again below
+				ignore_nextline = spaced_nextline
 				if has_msgid {
 					messageids = append(messageids, header_dat)
 					continue
@@ -1810,6 +1815,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 			} else
 			// ignore 'Expires' header
 			if header_key_L == "expires" {
+				ignore_nextline = spaced_nextline
 				continue
 			} else
 			// ignore 'Xref' header
@@ -1826,6 +1832,7 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 
 			if !spaced_line {
 				// no colon in header line
+				ignore_nextline = spaced_nextline
 				//if debug_header { log.Printf("[%s/%s/%s/%d] ihave: [%s] | NO colon in header msgid='%s' line='%s' spaced_line=%t x0x='%x' x0s='%x'", s.sessionid, s.username, s.cmdstring, s.beconn.backendID, s.fakegroup, s.messageid, line, spaced_line, line[0], line[0]) }
 				continue
 			}
