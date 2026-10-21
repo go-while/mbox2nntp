@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -105,11 +106,9 @@ func TestOpenRejects(t *testing.T) {
 	p.Close()
 }
 
-// A message whose stored size disagrees with what zstd puts out is an
-// error, not a shifted split.
-func TestEachSizeMismatch(t *testing.T) {
-	zstd := uattest.Zstd(t)
-	path := uattest.Write(t, zstd, t.TempDir(), "pl.test", "", testMsgs[:2])
+// setFirstSize writes size into the first zmeta record of the package at path.
+func setFirstSize(t *testing.T, path string, size uint32) {
+	t.Helper()
 	b, _ := os.ReadFile(path)
 	// zmeta is the 20th file; its first record's size field is at +8
 	off := int64(len(magic) + 1 + 8*len(packageFiles))
@@ -117,12 +116,22 @@ func TestEachSizeMismatch(t *testing.T) {
 	binary.Read(bytes.NewReader(b[len(magic)+1:]), binary.LittleEndian, sizes)
 	for i, f := range packageFiles {
 		if f == "zmeta" {
-			binary.LittleEndian.PutUint32(b[off+8:], uint32(len(testMsgs[0])+1))
+			binary.LittleEndian.PutUint32(b[off+8:], size)
 			break
 		}
 		off = (off + int64(sizes[i]) + 7) / 8 * 8
 	}
-	os.WriteFile(path, b, 0644)
+	if err := os.WriteFile(path, b, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A message whose stored size disagrees with what zstd puts out is an
+// error, not a shifted split.
+func TestEachSizeMismatch(t *testing.T) {
+	zstd := uattest.Zstd(t)
+	path := uattest.Write(t, zstd, t.TempDir(), "pl.test", "", testMsgs[:2])
+	setFirstSize(t, path, uint32(len(testMsgs[0])+1))
 	p, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
@@ -250,5 +259,44 @@ func TestFold(t *testing.T) {
 		if got := fold(c.in); !reflect.DeepEqual(got, c.want) {
 			t.Errorf("fold(%q)\n = %q\nwant %q", c.in, got, c.want)
 		}
+	}
+}
+
+// A size over MaxMessageSize is an error. A size under it that the data
+// does not back costs memory only for the data there is: a 99 KB file
+// used to make Each allocate 3 GiB.
+func TestEachSizeLimit(t *testing.T) {
+	zstd := uattest.Zstd(t)
+	path := uattest.Write(t, zstd, t.TempDir(), "pl.test", "", testMsgs[:2])
+	saved := MaxMessageSize
+	t.Cleanup(func() { MaxMessageSize = saved })
+
+	MaxMessageSize = len(testMsgs[0]) - 1
+	p, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = p.Each(zstd, "", func(int, []byte) error { return nil })
+	p.Close()
+	if err == nil || !strings.Contains(err.Error(), "over the limit") {
+		t.Errorf("over MaxMessageSize: err = %v", err)
+	}
+
+	MaxMessageSize = saved
+	setFirstSize(t, path, 200<<20)
+	p, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	err = p.Each(zstd, "", func(int, []byte) error { return nil })
+	runtime.ReadMemStats(&after)
+	if err == nil || !strings.Contains(err.Error(), "ended early") {
+		t.Errorf("size claimed 200 MiB: err = %v", err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 32<<20 {
+		t.Errorf("size claimed 200 MiB: allocated %d MiB", got>>20)
 	}
 }

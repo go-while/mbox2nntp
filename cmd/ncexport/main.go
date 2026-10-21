@@ -113,6 +113,7 @@ func (st stats) summary(input string) string {
 		{st.oddDots, `with a line starting with a single "." (kept)`},
 		{st.Missing, "listed in .db but not in the spool"},
 		{st.BadDBs, ".db files unreadable"},
+		{st.TooBig, "files over the size limit skipped"},
 		{st.Other, "other files skipped"},
 	} {
 		if c.n != 0 {

@@ -194,7 +194,30 @@ type Stats struct {
 	Listed   int // .db records of an article that is not inside the .db
 	Missing  int // of those, how many have no .artN either: not in the backup
 	Other    int // other files, skipped
+	TooBig   int // .artN and .db files over MaxArticleSize or MaxDBSize, skipped
 	Problems []string
+}
+
+// The largest .artN and .db files read. A bigger one is a broken or crafted
+// file, and would be held in memory whole: in a tarball a few KB of gzip can
+// stand for gigabytes. It is skipped, and counted in Stats.TooBig.
+var (
+	MaxArticleSize int64 = 256 << 20
+	MaxDBSize      int64 = 1 << 30
+)
+
+// tooBig reports, and counts, a file over its limit.
+func (s *scan) tooBig(name string, size int64, isArt bool) bool {
+	limit := MaxDBSize
+	if isArt {
+		limit = MaxArticleSize
+	}
+	if size <= limit {
+		return false
+	}
+	s.st.TooBig++
+	s.problem("%s: %d bytes, over the limit of %d, skipped", name, size, limit)
+	return true
 }
 
 const maxProblems = 100
@@ -330,6 +353,9 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 			s.st.Other++
 			continue
 		}
+		if s.tooBig(h.Name, h.Size, isArt) {
+			continue
+		}
 		data, err := io.ReadAll(tr)
 		if err != nil {
 			return s.st, fmt.Errorf("%s: %w", h.Name, err)
@@ -379,6 +405,15 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 				continue
 			}
 			num, isArt := ArtNum(e.Name())
+			if isArt || e.Name() == ".db" {
+				fi, err := e.Info()
+				if err != nil {
+					return err
+				}
+				if s.tooBig(filepath.Join(dir, e.Name()), fi.Size(), isArt) {
+					continue
+				}
+			}
 			switch {
 			case isArt:
 				items = append(items, entry{Item{Group: group, Num: num}, e.Name()})

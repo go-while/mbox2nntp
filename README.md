@@ -254,6 +254,9 @@ an existing one is never replaced.
 - **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
   files. It also counts the crossposted copies skipped, and the articles the `.db` lists
   but the spool does not have (overview only, never fetched by the cache).
+- **Size limits.** An `.artN` file over 256 MiB or a `.db` over 1 GiB is skipped with a
+  warning, and counted in the summary. Such a file is broken or crafted, and would be read
+  into memory whole.
 
 Checked on `97comp.tar.gz` (757 articles) and `rainbow.tar.gz` (518 articles from 616
 files in 34 groups). Every article mbox2nntp's parser reads back from the mbox equals the
@@ -337,8 +340,9 @@ When every article has been answered and none failed, the input is renamed to
 - A directory input is never renamed.
 
 An input is **not** marked done when any article ended in an error (or ran out of
-`-max-tries`), when articles were never sent because no worker could connect, or when the
-mbox parser stopped before the end of the file. Rerun it: articles the server already has
+`-max-tries`), when articles were never sent because no worker could connect, when the
+mbox parser stopped before the end of the file, or when an mbox article was over the size
+limit (see below). Rerun it: articles the server already has
 come back as `435` and cost little.
 
 The process exits 0 when it finishes a run, whether or not the input was marked done; the
@@ -371,6 +375,10 @@ Articles are skipped, not sent, when they have:
 - no `Date:`, or no `Subject:` (counted as `437`). Directory mode adds `Subject: --` and
   `From: anonymous` where they are missing, and drops `Distribution: local`.
 - more than 256 header lines (counted as `437`)
+- more than 256 MiB. An archive this big is broken or crafted, and the article would be
+  held in memory whole. In an mbox it is logged as an `ERROR`, counted in `too-big`, and
+  the input is not marked done. In directory mode the file is not read, like any other
+  bad file. A UAT archive whose index gives a message over 256 MiB is an error.
 
 Directory mode also skips files by name: index and overview files, archives, sources and
 binaries, `patch*`, and names containing `)`.
@@ -400,13 +408,15 @@ and always 0. For mbox inputs, the
 parser reports per file:
 
 ```
-[iterateMbox] Done read mbox file='...' msgNumber=1467 skipped=0 near-misses=0 stopped-early=false last-err=<nil>
+[iterateMbox] Done read mbox file='...' msgNumber=1467 skipped=0 too-big=0 near-misses=0 stopped-early=false last-err=<nil>
 ```
 
 - `skipped`: malformed messages the parser stepped over. The rest of the file is still
   read.
-- `stopped-early=true`: the parser lost its place before the end of the file, so the input
-  is not marked done. Look at `last-err`.
+- `too-big`: articles over 256 MiB, not sent. The input is not marked done.
+- `stopped-early=true`: the parser lost its place before the end of the file, or a read
+  error ended it, so the input is not marked done. Look at `last-err` and the `ERROR`
+  lines. An article whose body could not be read to the end is never sent cut short.
 - `near-misses`: body lines starting `From ` or `#! rnews ` that were *not* taken as a
   message separator. Up to five are logged with line numbers. In ordinary prose this is
   normal (`From Table 1 ...`). If the samples look like separators (`From user@host Thu

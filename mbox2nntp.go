@@ -591,6 +591,10 @@ func mvmbox(mboxfile string) {
 
 func read_file(file_path string) string {
 
+	if fi, err := os.Stat(file_path); err == nil && fi.Size() > int64(maxArticleSize) {
+		log.Printf("ERROR read_file(%s): %d bytes, %v", file_path, fi.Size(), errArticleTooBig)
+		return ""
+	}
 	lines, err0 := ioutil.ReadFile(file_path)
 	if err0 != nil {
 		log.Printf("read_file(%s) ReadFile err0='%v'", file_path, err0)
@@ -1184,21 +1188,41 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	return mboxReader, src
 }
 
+// maxArticleSize caps an article read from an mbox or from a file in a
+// directory. A bigger one is a broken or hostile input, and would be held in
+// memory whole, then copied. The mbox parser also limits the length of a
+// line (mbox.MaxLineLength), and package uat the size of a message.
+var maxArticleSize = 256 << 20 // a var for the tests
+
+var errArticleTooBig = errors.New("article over the size limit (256 MiB)")
+
 // readBody reads a message body into lines without their line endings.
 // isbinary is set, and the body left out, when DROPBINARY is on and a line
-// starts with "=ybegin".
-func readBody(bodyReader io.Reader) (body []string, isbinary bool) {
+// starts with "=ybegin". err is errArticleTooBig when the body is over
+// maxArticleSize, which is then read to its end and dropped, or the error
+// that stopped the reading before the end of the body.
+func readBody(bodyReader io.Reader) (body []string, isbinary bool, err error) {
 	buffer := make([]byte, 64*1024)
 	var part []byte // a line longer than buffer, read so far
+	size := 0
 	for {
 		n, err := bodyReader.Read(buffer)
 		if err != nil {
+			if err != io.EOF {
+				return nil, isbinary, err
+			}
+			if size > maxArticleSize && !isbinary {
+				return nil, isbinary, errArticleTooBig
+			}
 			if len(part) == 0 {
-				return body, isbinary
+				return body, isbinary, nil
 			}
 			n = 0 // the stream ended inside a line: keep what came
 		} else if n == 0 {
 			continue // io.Reader allows an empty read; it is not a line
+		} else if size += n; size > maxArticleSize {
+			body, part = nil, nil // read on to the next message
+			continue
 		} else if buffer[n-1] != '\n' {
 			// one Read returns at most len(buffer) bytes of a line; each
 			// piece used to become a line of its own
@@ -1227,6 +1251,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgNumber := 0
 	msgcnt := 0
 	skipped := 0
+	dropped := 0 // over maxArticleSize
 	var lastReadErr, prevErr error
 	stoppedEarly := false
 	//msgidmap := make(map[string]int)
@@ -1277,7 +1302,18 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			log.Printf("[iterateMbox] mbox %s msgid not found msgnum=%d \n map='%v' \n ko='%v' \n err='%v'", mboxfile, msgNumber, headermap, keysorder, err)
 		}
 
-		body, isbinary := readBody(message.BodyReader())
+		body, isbinary, berr := readBody(message.BodyReader())
+		if berr == errArticleTooBig {
+			dropped++
+			log.Printf("[iterateMbox] ERROR: file='%s' msgNumber=%d msgid='%s': %v, dropped, not marking done", mboxfile, msgNumber, msgid, berr)
+			continue
+		}
+		if berr != nil {
+			// the article is incomplete: never send it cut short
+			log.Printf("[iterateMbox] ERROR: file='%s' msgNumber=%d msgid='%s': reading the body: %v, not marking done", mboxfile, msgNumber, msgid, berr)
+			stoppedEarly = true
+			break
+		}
 
 		if msgid != "" {
 			err = nil
@@ -1310,7 +1346,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 	}
 	nearMisses, nearMissSamples := mboxReader.NearMisses()
-	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, nearMisses, stoppedEarly, lastReadErr)
+	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d too-big=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, dropped, nearMisses, stoppedEarly, lastReadErr)
 	// near-misses are body lines starting "From " or "#! rnews " that validid
 	// rejected: either ordinary text, or a separator shape validid does not
 	// know, in which case articles were merged. The samples tell which.
@@ -1320,7 +1356,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 	//close(worker_channel)
 
-	finishFeeding(stoppedEarly)
+	finishFeeding(stoppedEarly || dropped > 0)
 } // end func iterateMbox
 
 // finishFeeding is called when the reader has queued its last article: it

@@ -258,3 +258,41 @@ func TestReadTarGzipChecksum(t *testing.T) {
 		t.Error("truncated trailer: no error")
 	}
 }
+
+// Files over MaxArticleSize or MaxDBSize are skipped, not read whole.
+func TestTooBig(t *testing.T) {
+	savedArt, savedDB := MaxArticleSize, MaxDBSize
+	t.Cleanup(func() { MaxArticleSize, MaxDBSize = savedArt, savedDB })
+	files := spool()
+	MaxArticleSize = int64(len(files["x/y/.art2"]) - 1) // .art2 over, .art1 (small) not
+	MaxDBSize = int64(len(files["x/y/.db"]) - 1)
+	want := []got{{"x.y.z", 1, false, "small"}}
+	check := func(what string, items []got, st Stats, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if !reflect.DeepEqual(items, want) {
+			t.Errorf("%s: %+v\nwant %+v", what, items, want)
+		}
+		if st.TooBig != 2 || st.DBs != 0 || st.Files != 1 || len(st.Problems) != 2 || !strings.Contains(st.Problems[0], "over the limit") {
+			t.Errorf("%s: stats %+v", what, st)
+		}
+	}
+
+	var items []got
+	st, err := ReadTar(bytes.NewReader(writeTar(t, files, []string{"x/y/.art2", "x/y/z/.art1", "x/y/.db"}, true)), collect(&items))
+	check("tar", items, st, err)
+
+	root := filepath.Join(t.TempDir(), "x")
+	for name, data := range files {
+		p := filepath.Join(filepath.Dir(root), filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		if err := os.WriteFile(p, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items = nil
+	st, err = ReadDir(root, collect(&items))
+	check("dir", items, st, err)
+}

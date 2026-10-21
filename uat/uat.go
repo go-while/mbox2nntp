@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 )
 
@@ -38,6 +39,12 @@ const (
 	maxVersion  = 3
 	metaRecSize = 16 // RawImportMeta: uint64 offset, uint32 size, uint32 compressed size
 )
+
+// MaxMessageSize is the largest message Each accepts. The size of each
+// message is taken from the package; a bigger one is a broken or crafted
+// file, and is an error. Below it, memory is taken as the data arrives, so a
+// size that is a lie costs no more than the data that is really there.
+var MaxMessageSize = 256 << 20
 
 type section struct{ off, size int64 }
 
@@ -215,12 +222,18 @@ func (p *Package) split(r io.Reader, fn func(i int, msg []byte) error) error {
 	var buf []byte
 	for i := 0; i < p.Count(); i++ {
 		_, size, _ := p.entry(i)
-		if cap(buf) < int(size) {
-			buf = make([]byte, size)
+		if int64(size) > int64(MaxMessageSize) {
+			return fmt.Errorf("message %d of %d: %d bytes, over the limit of %d", i, p.Count(), size, MaxMessageSize)
 		}
-		buf = buf[:size]
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return fmt.Errorf("message %d of %d: zstd output ended early: %v", i, p.Count(), err)
+		buf = buf[:0]
+		for len(buf) < int(size) {
+			n := min(int(size)-len(buf), 1<<20)
+			buf = slices.Grow(buf, n)
+			m, err := io.ReadFull(r, buf[len(buf):len(buf)+n])
+			buf = buf[:len(buf)+m]
+			if err != nil {
+				return fmt.Errorf("message %d of %d: zstd output ended early: %v", i, p.Count(), err)
+			}
 		}
 		if err := fn(i, buf); err != nil {
 			return err

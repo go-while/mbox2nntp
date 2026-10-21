@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -1131,10 +1132,13 @@ func (c *chunkReader) Read(p []byte) (int, error) {
 func TestReadBodyLongLine(t *testing.T) {
 	long := strings.Repeat("x", 200*1024)
 	exact := strings.Repeat("y", 64*1024-1) // with its "\n", fills the buffer exactly
-	body, isbinary := readBody(&chunkReader{lines: []string{
+	body, isbinary, err := readBody(&chunkReader{lines: []string{
 		"short\n", long + "\r\n", exact + "\n", "", "no newline at the end",
 	}})
 	want := []string{"short", long, exact, "no newline at the end"}
+	if err != nil {
+		t.Fatal(err)
+	}
 	if isbinary || len(body) != len(want) {
 		t.Fatalf("got %d lines (isbinary=%t), want %d", len(body), isbinary, len(want))
 	}
@@ -1179,7 +1183,10 @@ func TestFinalLineWithoutNewlineReachesBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, _ := readBody(msg.BodyReader())
+	body, _, err := readBody(msg.BodyReader())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if want := []string{"first", "last, no newline"}; strings.Join(body, "|") != strings.Join(want, "|") {
 		t.Errorf("body = %q, want %q", body, want)
 	}
@@ -1193,5 +1200,121 @@ func TestUATSuffix(t *testing.T) {
 		if got := uatSuffix(in); got != want {
 			t.Errorf("uatSuffix(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func setMaxArticleSize(t *testing.T, n int) {
+	saved := maxArticleSize
+	maxArticleSize = n
+	t.Cleanup(func() { maxArticleSize = saved })
+}
+
+type failingReader struct {
+	r   io.Reader
+	err error
+}
+
+func (f *failingReader) Read(p []byte) (int, error) {
+	n, err := f.r.Read(p)
+	if err == io.EOF {
+		return 0, f.err
+	}
+	return n, err
+}
+
+// A body over maxArticleSize is read to its end and dropped, and a read
+// error is returned instead of the lines read so far: the article would be
+// sent cut short.
+func TestReadBodyLimits(t *testing.T) {
+	setMaxArticleSize(t, 100)
+	line := strings.Repeat("x", 39) + "\n"
+	lines := []string{line, line, line}
+	cr := &chunkReader{lines: append(append([]string{}, lines...), "after\n")}
+	body, _, err := readBody(cr)
+	if err != errArticleTooBig || body != nil {
+		t.Errorf("over the limit: %d lines, %v; want none, errArticleTooBig", len(body), err)
+	}
+	if len(cr.lines) != 0 {
+		t.Errorf("%d chunks left unread", len(cr.lines))
+	}
+
+	if body, _, err := readBody(&chunkReader{lines: lines[:2]}); err != nil || len(body) != 2 {
+		t.Errorf("under the limit: %d lines, %v", len(body), err)
+	}
+
+	// dropped anyway: not an error
+	saved := DROPBINARY
+	t.Cleanup(func() { DROPBINARY = saved })
+	DROPBINARY = true
+	if _, isbinary, err := readBody(&chunkReader{lines: append([]string{"=ybegin line=128\n"}, lines...)}); !isbinary || err != nil {
+		t.Errorf("binary over the limit: isbinary=%t err=%v; want true, nil", isbinary, err)
+	}
+
+	broken := errors.New("disk on fire")
+	body, _, err = readBody(&failingReader{r: strings.NewReader("one\ntwo\n"), err: broken})
+	if err != broken || body != nil {
+		t.Errorf("read error: %q, %v; want no lines, the error", body, err)
+	}
+}
+
+// iterateMbox with a dry-run worker: an article over the limit is not
+// sent, the others are, and the input is not marked done.
+func TestIterateMboxTooBig(t *testing.T) {
+	setMaxArticleSize(t, 1000)
+	savedDry, savedMax := DRYRUN, MaxWorkers
+	t.Cleanup(func() { DRYRUN, MaxWorkers = savedDry, savedMax })
+	DRYRUN, MaxWorkers = true, 1
+	const sep = "From nobody Thu Dec  8 12:55:04 2016\n"
+	article := func(id, body string) string {
+		return sep + "Subject: s\nFrom: a@b.c\nDate: Thu, 8 Dec 2016 12:55:04 +0000\nNewsgroups: x.test\nMessage-ID: " + id + "\n\n" + body
+	}
+	for _, c := range []struct {
+		name string
+		big  string
+		sent int
+		done bool
+	}{
+		{"fits", strings.Repeat("y\n", 400), 3, true},
+		{"too big", strings.Repeat("y\n", 600), 2, false},
+	} {
+		in := article("<a@test>", "one\n") + article("<b@test>", c.big) + article("<c@test>", "three\n")
+		mr, err := mbox.CreateMboxStream(strings.NewReader(in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		shortTimeouts(t)
+		globalBools.V = make(map[string]bool)
+		globalCounter = GlobalCounter{v: make(map[string]int)}
+		worker_channel = make(chan *ArticleItem, 10)
+		returned := make(chan bool)
+		go func() { worker(1); close(returned) }()
+		iterateMbox(mr, &eofReader{r: strings.NewReader(""), sawEOF: true}, c.name)
+		<-returned
+		if sent := globalCounter.getCounter("sent"); sent != c.sent {
+			t.Errorf("%s: sent %d, want %d", c.name, sent, c.sent)
+		}
+		if done := globalBools.GetGB("done"); done != c.done {
+			t.Errorf("%s: done = %t, want %t", c.name, done, c.done)
+		}
+	}
+}
+
+// Directory mode: an article file over maxArticleSize is not read.
+func TestReadFileTooBig(t *testing.T) {
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	worker_channel = make(chan *ArticleItem, 8)
+	fp := filepath.Join(t.TempDir(), "1")
+	art := "From: a@b.c\nSubject: s\nDate: Mon, 30 Jun 2003 23:33:23 GMT\nMessage-ID: <big@test>\n\n" + strings.Repeat("y\n", 100)
+	if err := os.WriteFile(fp, []byte(art), 0644); err != nil {
+		t.Fatal(err)
+	}
+	setMaxArticleSize(t, len(art))
+	if msgid := read_file(fp); msgid != "<big@test>" {
+		t.Fatalf("at the limit: read_file = %q", msgid)
+	}
+	setMaxArticleSize(t, len(art)-1)
+	if msgid := read_file(fp); msgid != "" || len(worker_channel) != 1 {
+		t.Errorf("over the limit: read_file = %q, queued %d; want dropped", msgid, len(worker_channel))
 	}
 }
