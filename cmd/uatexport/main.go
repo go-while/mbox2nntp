@@ -39,8 +39,10 @@ and renamed when complete.
 
 The mbox is mboxrd: each article starts with "From nobody DATE", DATE taken
 from its Date header, and body lines that start with "From " or ">From "
-get one more ">". To feed an archive to a server, give the .usenet file to
-mbox2nntp itself: it does not un-escape ">From " lines.
+get one more ">", as do lines starting "#! rnews ", which mbox2nntp's
+parser takes for the start of a message. To feed an archive to a server,
+give the .usenet file to mbox2nntp itself: it does not un-escape ">From "
+lines.
 
 Flags:
 `

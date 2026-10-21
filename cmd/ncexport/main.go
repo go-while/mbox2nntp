@@ -46,7 +46,8 @@ every copy).
 
 The mbox is mboxrd: each article starts with "From nobody DATE", DATE taken
 from its Date header, and body lines that start with "From " or ">From "
-get one more ">".
+get one more ">", as do lines starting "#! rnews ", which mbox2nntp's
+parser takes for the start of a message.
 
 Flags:
 `

@@ -1,12 +1,16 @@
 package mboxout
 
 import (
+	"bufio"
 	"compress/gzip"
 	"flag"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	mbox "github.com/go-while/go-lib-mbox2nntp"
 )
 
 // An mbox appears only on Close, gzipped when asked, and is never replaced.
@@ -116,6 +120,68 @@ func TestFromDate(t *testing.T) {
 	} {
 		if got := FromDate(tc.head); got != tc.want {
 			t.Errorf("FromDate(%q) = %q, want %q", tc.head, got, tc.want)
+		}
+	}
+}
+
+// Body lines that look like a message separator to go-lib-mbox2nntp,
+// mbox2nntp's parser, are quoted: the parser reads back exactly the
+// articles written, whole.
+func TestRoundTripSeparatorLines(t *testing.T) {
+	bodies := [][]string{
+		{"A batch starts like this:", "#! rnews 1234", "Path: foo", "", "and so on"},
+		{"From nobody Thu Dec  8 12:55:04 2016", "From MAILER-DAEMON Mon Jan  1", "From 12345678", ">From quoted", "#! rnews x"},
+		{"last"},
+	}
+	path := filepath.Join(t.TempDir(), "x.mbox")
+	w, err := Create(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, b := range bodies {
+		head := []string{"Subject: " + string(rune('a'+i)), "Message-ID: <" + string(rune('a'+i)) + "@x>"}
+		if err := w.Write(head, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	mr, err := mbox.CreateMboxStream(bufio.NewReader(f))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; ; i++ {
+		m, err := mr.ReadMessage()
+		if err == io.EOF {
+			if i != len(bodies) {
+				t.Errorf("read back %d articles, want %d", i, len(bodies))
+			}
+			return
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(m.BodyReader())
+		if i >= len(bodies) {
+			t.Errorf("extra article %d: %q", i, b)
+			continue
+		}
+		var want strings.Builder
+		for _, l := range bodies[i] {
+			if NeedsQuote(l) {
+				want.WriteByte('>')
+			}
+			want.WriteString(l + "\n")
+		}
+		want.WriteString("\n") // the blank line before the next "From "
+		if string(b) != want.String() {
+			t.Errorf("article %d: body %q\nwant %q", i, b, want.String())
 		}
 	}
 }

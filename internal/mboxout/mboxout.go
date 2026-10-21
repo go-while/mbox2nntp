@@ -163,7 +163,8 @@ func Create(path string, level int) (*Writer, error) {
 }
 
 // Write adds one article: a "From nobody DATE" line, the header lines, a
-// blank line, the body lines with "From " lines quoted, and a blank line.
+// blank line, the body lines with NeedsQuote lines quoted, and a blank
+// line.
 func (m *Writer) Write(head, body []string) error {
 	fmt.Fprintf(m.w, "From nobody %s\n", FromDate(head))
 	for _, l := range head {
@@ -172,7 +173,7 @@ func (m *Writer) Write(head, body []string) error {
 	}
 	m.w.WriteByte('\n')
 	for _, l := range body {
-		if IsFromLine(l) {
+		if NeedsQuote(l) {
 			m.w.WriteByte('>')
 		}
 		m.w.WriteString(l)
@@ -207,9 +208,13 @@ func (m *Writer) Abort() {
 	RemoveTemp(m.f.Name())
 }
 
-// IsFromLine reports a line mboxrd quotes: "From " after any number of ">".
-func IsFromLine(l string) bool {
-	return strings.HasPrefix(strings.TrimLeft(l, ">"), "From ")
+// NeedsQuote reports a body line that gets one more ">": the lines mboxrd
+// quotes, "From " after any number of ">", and lines starting "#! rnews ".
+// go-lib-mbox2nntp, mbox2nntp's mbox parser, also takes "#! rnews N" for
+// the start of a message (rnews batches), so such a line in a body would
+// split the article there; ">#! rnews N" is body text to it.
+func NeedsQuote(l string) bool {
+	return strings.HasPrefix(strings.TrimLeft(l, ">"), "From ") || strings.HasPrefix(l, "#! rnews ")
 }
 
 // FromDate is the date on the "From " line: the article's Date in UTC, in

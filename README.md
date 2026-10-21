@@ -211,7 +211,8 @@ Other programs can read UAT archives with the package `github.com/go-while/mbox2
 (standard library only, plus the zstd program); `uat/uattest` writes small archives for
 their tests.
 
-The mbox is mboxrd (`From ` body lines get a `>`), with a `From nobody DATE` line that
+The mbox is mboxrd (`From ` body lines get a `>`, and so do `#! rnews ` lines, which
+mbox2nntp's parser takes for the start of a message), with a `From nobody DATE` line that
 mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
 to a server, give mbox2nntp the `.usenet` file, not the exported mbox: it does not un-escape
 `>From ` lines. An exported directory works as a `DIR` input.
