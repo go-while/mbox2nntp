@@ -1597,6 +1597,11 @@ func ihave(wid int, msgid string, head []string, bodylines []string, srvtp *text
 		//srvtp.EndResponse(id)
 
 		for _, line := range newhead {
+			// RFC 3977 3.1.1 stuffs every line of the article, the
+			// header too: only body lines used to get the extra dot
+			if strings.HasPrefix(line, DOT) {
+				line = DOT + line
+			}
 			_, err := io.WriteString(CliWriter, line+CRLF)
 			if err != nil {
 				log.Printf("ERROR Worker %d ihave failed head msgid='%s' err='%v'", wid, msgid, err)

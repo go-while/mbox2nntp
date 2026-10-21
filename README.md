@@ -364,7 +364,8 @@ Articles are sent as stored, apart from these changes to the header:
 - `Key:value` without a space after the colon is repaired to `Key: value`.
 - NUL, backspace and tab in header lines become spaces.
 
-Body lines are sent exactly as stored, dot-stuffed for the wire. `>From ` lines are not
+Body lines are sent exactly as stored. Every line, header and body, is dot-stuffed for
+the wire (RFC 3977 3.1.1). `>From ` lines are not
 un-escaped: none of the archives measured so far is mbox-escaped, and in all of them a
 `>From ` line is part of the article as posted.
 

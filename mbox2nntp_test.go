@@ -16,6 +16,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -78,7 +79,8 @@ func startFakeNNTP(t *testing.T, captured chan<- string) string {
 }
 
 // TestIhaveBodyRoundTrip covers A1 (dot-stuffing) and A3 (trailing CR):
-// what IHAVE puts on the wire must un-stuff back to exactly what went in.
+// what IHAVE puts on the wire must un-stuff back to exactly what went in,
+// header lines included (RFC 3977 3.1.1 stuffs every line).
 func TestIhaveBodyRoundTrip(t *testing.T) {
 	globalBools.V = make(map[string]bool)
 
@@ -93,6 +95,7 @@ func TestIhaveBodyRoundTrip(t *testing.T) {
 		"Subject: dot stuffing",
 		"Date: Mon, 30 Jun 2003 23:33:23 GMT",
 		"Message-ID: <roundtrip@test>",
+		".X-Dot: a header line starting with a dot",
 	}
 	body := []string{
 		"normal line",
@@ -122,6 +125,10 @@ func TestIhaveBodyRoundTrip(t *testing.T) {
 	}
 	if sep < 0 {
 		t.Fatalf("no header/body separator on the wire:\n%q", wire)
+	}
+
+	if !slices.Contains(unstuffed[:sep], head[4]) {
+		t.Errorf("header line %q lost its dot on the wire:\n%q", head[4], unstuffed[:sep])
 	}
 
 	got := unstuffed[sep+1:]
