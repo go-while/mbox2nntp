@@ -28,8 +28,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"github.com/go-while/mbox2nntp/internal/version"
 )
 
 const usage = `Usage: %[1]s [flags] LIST.csv
@@ -118,7 +116,7 @@ func parseFlags(args []string) (options, string) {
 	}
 	fs.Parse(args)
 	if *showVersion {
-		fmt.Println(version.String("iafetch"))
+		fmt.Println(versionString("iafetch"))
 		os.Exit(0)
 	}
 	if (fs.NArg() != 1 && !o.status) || fs.NArg() > 1 || o.jobs < 1 {
@@ -277,7 +275,7 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	c := &client{
 		http:    &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, MaxIdleConnsPerHost: o.jobs + 1, ResponseHeaderTimeout: 2 * time.Minute}},
 		base:    strings.TrimRight(o.base, "/"),
-		agent:   version.String("iafetch") + " (https://github.com/go-while/mbox2nntp)",
+		agent:   versionString("iafetch") + " (https://github.com/go-while/mbox2nntp)",
 		retries: o.retries,
 		backoff: o.backoff,
 	}

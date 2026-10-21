@@ -34,7 +34,7 @@ GOOS=darwin  GOARCH=arm64 go build -o mbox2nntp-mac .   # macOS, Apple silicon
 GOOS=darwin  GOARCH=amd64 go build -o mbox2nntp-mac .   # macOS, Intel
 go build -o uatexport ./cmd/uatexport                   # the UAT exporter
 go build -o ncexport ./cmd/ncexport                     # the NewsCache exporter
-go build -o iafetch ./cmd/iafetch                       # the archive.org downloader
+go -C cmd/iafetch build -o ../../iafetch .             # the archive.org downloader
 ```
 
 `./build_All.sh` builds all four at once, stamped with the `git describe` version; it
@@ -43,8 +43,11 @@ takes an output directory, and honours `GOOS`/`GOARCH`
 
 Needs Go 1.27.3 or later. Apart from the Go standard library, mbox2nntp's only dependency is
 the mbox parser [`go-lib-mbox2nntp`](https://github.com/go-while/go-lib-mbox2nntp), a fork of
-`github.com/sam-falvo/mbox`. `iafetch` also uses [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite),
-a SQLite written in pure Go, so it needs no C compiler and no SQLite library.
+`github.com/sam-falvo/mbox`. `iafetch` uses [`modernc.org/sqlite`](https://pkg.go.dev/modernc.org/sqlite),
+a SQLite written in pure Go, so it needs no C compiler and no SQLite library. It brings
+third-party modules with it, so iafetch is a Go module of its own (`cmd/iafetch/go.mod`):
+mbox2nntp and the other commands do not depend on them. Build, vet and test it from its
+directory, or with `go -C cmd/iafetch ...`.
 
 ## Usage
 
@@ -271,7 +274,7 @@ whether or not its files are still there**, so imported files can be moved or de
 the next run goes on with the items after them.
 
 ```
-go build -o iafetch ./cmd/iafetch
+go -C cmd/iafetch build -o ../../iafetch .
 iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
 iafetch -tier A archive.org/import-order.csv            # the early era first
 iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv

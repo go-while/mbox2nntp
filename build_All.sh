@@ -13,14 +13,17 @@ set -euo pipefail
 cd "$(dirname "$0")"
 out=${1:-.}
 mkdir -p "$out"
+out=$(cd "$out" && pwd) # go -C below changes directory
 
 ver=$(git describe --tags --dirty --always 2>/dev/null || echo dev)
-ldflags="-s -w -X github.com/go-while/mbox2nntp/internal/version.Version=$ver"
+# main.buildVersion is iafetch's; the linker ignores it in the others
+ldflags="-s -w -X github.com/go-while/mbox2nntp/internal/version.Version=$ver -X main.buildVersion=$ver"
 ext=""
 [[ $(go env GOOS) == windows ]] && ext=".exe"
 
-for cmd in mbox2nntp:. uatexport:./cmd/uatexport ncexport:./cmd/ncexport iafetch:./cmd/iafetch; do
-	name=${cmd%%:*}
-	CGO_ENABLED=0 go build -trimpath -ldflags "$ldflags" -o "$out/$name$ext" "${cmd#*:}"
+# NAME:MODULE_DIR:PACKAGE; iafetch is a module of its own (cmd/iafetch/go.mod)
+for cmd in mbox2nntp:.:. uatexport:.:./cmd/uatexport ncexport:.:./cmd/ncexport iafetch:cmd/iafetch:.; do
+	IFS=: read -r name mod pkg <<<"$cmd"
+	CGO_ENABLED=0 go -C "$mod" build -trimpath -ldflags "$ldflags" -o "$out/$name$ext" "$pkg"
 	echo "built $out/$name$ext ($ver $(go env GOOS)/$(go env GOARCH))"
 done

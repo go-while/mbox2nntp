@@ -13,7 +13,8 @@ if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
 fi
 
 targets="linux/amd64 linux/arm64 windows/amd64 windows/arm64 darwin/amd64 darwin/arm64 freebsd/amd64"
-ldflags="-s -w -X github.com/go-while/mbox2nntp/internal/version.Version=$tag"
+# main.buildVersion is iafetch's; the linker ignores it in the others
+ldflags="-s -w -X github.com/go-while/mbox2nntp/internal/version.Version=$tag -X main.buildVersion=$tag"
 
 rm -rf dist
 mkdir -p dist
@@ -25,9 +26,11 @@ for target in $targets; do
 	name="mbox2nntp_${tag}_${goos}_${goarch}"
 	dir="dist/$name"
 	mkdir -p "$dir"
-	for cmd in mbox2nntp:. uatexport:./cmd/uatexport ncexport:./cmd/ncexport iafetch:./cmd/iafetch; do
+	# NAME:MODULE_DIR:PACKAGE; iafetch is a module of its own (cmd/iafetch/go.mod)
+	for cmd in mbox2nntp:.:. uatexport:.:./cmd/uatexport ncexport:.:./cmd/ncexport iafetch:cmd/iafetch:.; do
+		IFS=: read -r bin mod pkg <<<"$cmd"
 		CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
-			go build -trimpath -ldflags "$ldflags" -o "$dir/${cmd%%:*}$ext" "${cmd#*:}"
+			go -C "$mod" build -trimpath -ldflags "$ldflags" -o "$PWD/$dir/$bin$ext" "$pkg"
 	done
 	cp README.md LICENSE "$dir/"
 	if [[ $goos == windows ]]; then
