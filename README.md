@@ -380,7 +380,9 @@ Articles are skipped, not sent, when they have:
 - more than 256 MiB. An archive this big is broken or crafted, and the article would be
   held in memory whole. In an mbox it is logged as an `ERROR`, counted in `too-big`, and
   the input is not marked done. In directory mode the file is not read, like any other
-  bad file. A UAT archive whose index gives a message over 256 MiB is an error.
+  bad file. The mbox parser also refuses a line over 64 MiB, which stops the file there
+  (`stopped-early=true`), and a UAT archive whose index gives a message over 256 MiB is an
+  error.
 
 Directory mode also skips files by name: index and overview files, archives, sources and
 binaries, `patch*`, and names containing `)`.

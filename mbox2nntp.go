@@ -1265,6 +1265,13 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 				log.Printf("[iterateMbox] EOF @ msgNumber=%d mboxfile=%s", msgNumber, mboxfile)
 				break
 			}
+			if errors.Is(err, mbox.ErrLineTooLong) {
+				// the parser reads no further: not a skipped message
+				log.Printf("[iterateMbox] ERROR: file='%s' err='%v' msgNumber=%d, not marking done", mboxfile, err, msgNumber)
+				lastReadErr = err
+				stoppedEarly = true
+				break
+			}
 			// After a malformed message the library skips to the next
 			// separator, so each error costs that one message. Parse
 			// errors carry their line number: the same one twice in a

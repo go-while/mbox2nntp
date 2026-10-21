@@ -1265,9 +1265,13 @@ func TestReadBodyLimits(t *testing.T) {
 }
 
 // iterateMbox with a dry-run worker: an article over the limit is not
-// sent, the others are, and the input is not marked done.
+// sent, the others are, and the input is not marked done. A line over
+// mbox.MaxLineLength stops the reading there, also not done.
 func TestIterateMboxTooBig(t *testing.T) {
 	setMaxArticleSize(t, 1000)
+	savedLine := mbox.MaxLineLength
+	t.Cleanup(func() { mbox.MaxLineLength = savedLine })
+	mbox.MaxLineLength = 500
 	savedDry, savedMax := DRYRUN, MaxWorkers
 	t.Cleanup(func() { DRYRUN, MaxWorkers = savedDry, savedMax })
 	DRYRUN, MaxWorkers = true, 1
@@ -1283,8 +1287,17 @@ func TestIterateMboxTooBig(t *testing.T) {
 	}{
 		{"fits", strings.Repeat("y\n", 400), 3, true},
 		{"too big", strings.Repeat("y\n", 600), 2, false},
+		// over mbox.MaxLineLength, set to 500 below: the parser stops
+		{"long body line", strings.Repeat("y", 600) + "\n", 1, false},
+		{"long header line", "", 1, false},
 	} {
+		if c.big == "" {
+			c.big = "body\n"
+		}
 		in := article("<a@test>", "one\n") + article("<b@test>", c.big) + article("<c@test>", "three\n")
+		if c.name == "long header line" {
+			in = strings.Replace(in, "Message-ID: <b@test>", "X-Long: "+strings.Repeat("h", 600)+"\nMessage-ID: <b@test>", 1)
+		}
 		mr, err := mbox.CreateMboxStream(strings.NewReader(in))
 		if err != nil {
 			t.Fatal(err)
