@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/go-while/mbox2nntp/internal/mboxout"
@@ -40,6 +42,10 @@ sent them, with the CRLF line ends and the doubled leading dots undone. A
 tarball is written in its own order, a directory group by group and by
 article number.
 
+A .db is read one record at a time, never whole; a .db over -max-db is
+skipped. From a tarball, a .db over 1 MiB is copied to a temporary file in
+-tmpdir while it is read, as its records are not in file order.
+
 An article crossposted to several groups is in each group's directory. It
 is written once, the first time its Message-ID is seen (-dedup=false writes
 every copy).
@@ -53,9 +59,66 @@ Flags:
 `
 
 type options struct {
-	out   string
-	gzip  int
-	dedup bool
+	out    string
+	gzip   int
+	dedup  bool
+	tmpdir string
+}
+
+// sizeFlag is a size in bytes, given as a number with an optional K, M, G
+// or T (powers of 1024, also written KiB, MiB, ... or KB, MB, ...). 0 means
+// no limit.
+type sizeFlag struct{ p *int64 }
+
+func (f sizeFlag) String() string {
+	if f.p == nil {
+		return ""
+	}
+	return formatSize(*f.p)
+}
+
+func (f sizeFlag) Set(s string) error {
+	n, err := parseSize(s)
+	if err != nil {
+		return err
+	}
+	*f.p = n
+	return nil
+}
+
+func parseSize(s string) (int64, error) {
+	t := strings.ToUpper(strings.TrimSpace(s))
+	t = strings.TrimSuffix(strings.TrimSuffix(t, "B"), "I")
+	shift := 0
+	if t != "" {
+		if i := strings.IndexByte("KMGT", t[len(t)-1]); i >= 0 {
+			shift = 10 * (i + 1)
+			t = t[:len(t)-1]
+		}
+	}
+	n, err := strconv.ParseInt(t, 10, 64)
+	if err != nil || n < 0 || n > math.MaxInt64>>shift {
+		return 0, fmt.Errorf("not a size: %q (such as 4G, 16GiB or 1048576)", s)
+	}
+	if n == 0 {
+		return math.MaxInt64, nil
+	}
+	return n << shift, nil
+}
+
+func formatSize(n int64) string {
+	if n == math.MaxInt64 {
+		return "0"
+	}
+	for _, u := range []struct {
+		s     string
+		shift int
+	}{{"T", 40}, {"G", 30}, {"M", 20}, {"K", 10}} {
+		if n >= 1<<u.shift && n%(1<<u.shift) == 0 {
+			return strconv.FormatInt(n>>u.shift, 10) + u.s
+		}
+	}
+	return strconv.FormatInt(n, 10)
 }
 
 func main() {
@@ -65,6 +128,8 @@ func main() {
 	fs.StringVar(&o.out, "o", "", "output `PATH` (default: NAME.mbox or NAME.mbox.gz)")
 	fs.Var(mboxout.GzipFlag{Level: &o.gzip}, "gzip", "gzip the mbox, to NAME.mbox.gz; -gzip=N sets the level, from 1 (fastest) to 9 (smallest), default 6")
 	fs.BoolVar(&o.dedup, "dedup", true, "write an article seen in several groups once, by Message-ID")
+	fs.Var(sizeFlag{&newscache.MaxDBSize}, "max-db", "skip a .db over `SIZE`, such as 16G; 0 for no limit. 4G is the most a 32-bit NewsCache can write; one from a 64-bit build can be bigger")
+	fs.StringVar(&o.tmpdir, "tmpdir", "", "`DIR` for the temporary copy of a .db over 1 MiB from a tarball (default: the output's directory)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), usage, filepath.Base(os.Args[0]))
@@ -113,7 +178,8 @@ func (st stats) summary(input string) string {
 		{st.oddDots, `with a line starting with a single "." (kept)`},
 		{st.Missing, "listed in .db but not in the spool"},
 		{st.BadDBs, ".db files unreadable"},
-		{st.TooBig, "articles or .db files over the size limit skipped"},
+		{st.TooBig, "articles over 1 MiB skipped"},
+		{st.BigDBs, ".db files over -max-db (" + formatSize(newscache.MaxDBSize) + ") skipped: their articles are missing, raise -max-db"},
 		{st.Other, "other files skipped"},
 	} {
 		if c.n != 0 {
@@ -170,6 +236,10 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 		}
 	}
 
+	newscache.TempDir = o.tmpdir
+	if newscache.TempDir == "" {
+		newscache.TempDir = filepath.Dir(st.out)
+	}
 	w, err := mboxout.Create(st.out, o.gzip)
 	if err != nil {
 		return st, err

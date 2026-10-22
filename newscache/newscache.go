@@ -269,7 +269,8 @@ type Stats struct {
 	Listed   int // .db records of an article that is not inside the .db
 	Missing  int // of those, how many have no .artN either: not in the backup
 	Other    int // other files, skipped
-	TooBig   int // .artN files and .db records over MaxArticleSize, and .db files over MaxDBSize, skipped
+	TooBig   int // articles over MaxArticleSize, .artN files or .db records, skipped
+	BigDBs   int // .db files over MaxDBSize, skipped
 	Problems []string
 }
 
@@ -278,14 +279,19 @@ type Stats struct {
 // Text articles are mostly under 16 KB, and servers rarely take one over
 // 256 KB. A .db is never held whole (see ReadDB): it holds an overview
 // line per article, and NewsCache keeps the articles of 15 KB or less in
-// it too, so a big group's .db can be large. MaxDBSize, the most a 32-bit
-// NewsCache can address, only stops a broken or crafted file: in a
-// tarball a few KB of gzip can stand for gigabytes, and a .db from a
-// tarball goes to a temporary file.
+// it too, so a big group's .db can be large. MaxDBSize stops a broken or
+// crafted file: in a tarball a few KB of gzip can stand for gigabytes,
+// and a .db from a tarball goes to a temporary file. 4 GiB is the most a
+// 32-bit NewsCache can address; a 64-bit one has no such bound, so a big
+// group's .db from one may need more.
 var (
 	MaxArticleSize int64 = 1 << 20
 	MaxDBSize      int64 = 4 << 30
 )
+
+// TempDir is where a .db from a tarball over 1 MiB is copied while it is
+// read; empty means os.TempDir().
+var TempDir string
 
 // A .db from a tarball up to this size is read into memory; a bigger one
 // is copied to a temporary file, as ReadDB needs to read it out of order.
@@ -300,7 +306,11 @@ func (s *scan) tooBig(name string, size int64, isArt bool) bool {
 	if size <= limit {
 		return false
 	}
-	s.st.TooBig++
+	if isArt {
+		s.st.TooBig++
+	} else {
+		s.st.BigDBs++
+	}
 	s.problem("%s: %d bytes, over the limit of %d, skipped", name, size, limit)
 	return true
 }
@@ -380,7 +390,7 @@ func (s *scan) tarDB(group, name string, tr io.Reader, size int64) error {
 		}
 		return s.db(group, name, bytes.NewReader(data), int64(len(data)), s.fn)
 	}
-	f, err := os.CreateTemp("", "newscache-*.db")
+	f, err := os.CreateTemp(TempDir, "newscache-*.db")
 	if err != nil {
 		return err
 	}

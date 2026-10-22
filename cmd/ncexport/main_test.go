@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/binary"
+	"flag"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -207,5 +209,85 @@ func TestOutName(t *testing.T) {
 	}
 	if got := outName("a.tar.gz", true); got != "a.mbox.gz" {
 		t.Errorf("gz: %q", got)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for in, want := range map[string]int64{
+		"1048576": 1 << 20, "4G": 4 << 30, "4g": 4 << 30, "16GiB": 16 << 30, "16GB": 16 << 30,
+		"512M": 512 << 20, "2T": 2 << 40, "8k": 8 << 10, " 3G ": 3 << 30, "0": math.MaxInt64,
+	} {
+		if got, err := parseSize(in); err != nil || got != want {
+			t.Errorf("parseSize(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "G", "-1G", "1.5G", "4X", "9999999T"} {
+		if got, err := parseSize(in); err == nil {
+			t.Errorf("parseSize(%q) = %d, want an error", in, got)
+		}
+	}
+	for n, want := range map[int64]string{4 << 30: "4G", 1536 << 20: "1536M", 1000: "1000", math.MaxInt64: "0"} {
+		if got := formatSize(n); got != want {
+			t.Errorf("formatSize(%d) = %q, want %q", n, got, want)
+		}
+	}
+}
+
+// A .db over -max-db is skipped and counted on its own, and the summary
+// says its articles are missing.
+func TestMaxDB(t *testing.T) {
+	saved := newscache.MaxDBSize
+	t.Cleanup(func() { newscache.MaxDBSize = saved })
+	fs := flag.NewFlagSet("x", flag.ContinueOnError)
+	fs.Var(sizeFlag{&newscache.MaxDBSize}, "max-db", "")
+	if err := fs.Parse([]string{"-max-db", "100"}); err != nil || newscache.MaxDBSize != 100 {
+		t.Fatalf("-max-db 100: %d, %v", newscache.MaxDBSize, err)
+	}
+	dir := t.TempDir()
+	in := filepath.Join(dir, "h.tar")
+	if err := os.WriteFile(in, tarball(t, false), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st, err := export(in, nil, options{out: filepath.Join(dir, "h.mbox"), dedup: true})
+	if err != nil || st.BigDBs != 1 || st.TooBig != 0 || st.InDB != 0 || st.n != 2 {
+		t.Fatalf("%+v, %v", st, err)
+	}
+	if s := st.summary(in); !strings.Contains(s, "1 .db files over -max-db (100) skipped") {
+		t.Errorf("summary: %s", s)
+	}
+}
+
+// The temporary copy of a big .db goes to -tmpdir, by default the
+// output's directory, not to os.TempDir(), which may be small or in RAM.
+func TestTmpdir(t *testing.T) {
+	saved := newscache.TempDir
+	t.Cleanup(func() { newscache.TempDir = saved })
+	recs := map[uint64]newscachetest.Record{}
+	for i := uint64(1); i <= 5000; i++ {
+		recs[i] = newscachetest.Record{Type: newscachetest.Overview, Data: strings.Repeat("o", 300)}
+	}
+	db := newscachetest.DB(binary.LittleEndian, 8, 1, 5000, recs) // over 1 MiB
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	tw.WriteHeader(&tar.Header{Name: "g/.db", Mode: 0644, Size: int64(len(db))})
+	tw.Write(db)
+	tw.Close()
+	dir := t.TempDir()
+	in := filepath.Join(dir, "g.tar")
+	if err := os.WriteFile(in, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out", "g.mbox")
+	os.Mkdir(filepath.Dir(out), 0755)
+	st, err := export(in, nil, options{out: out})
+	if err != nil || st.Listed != 5000 || newscache.TempDir != filepath.Dir(out) {
+		t.Fatalf("default: %+v, %v, TempDir %q", st, err, newscache.TempDir)
+	}
+	if left, _ := filepath.Glob(filepath.Join(dir, "out", "newscache-*")); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+	missing := filepath.Join(dir, "no-such-dir")
+	if _, err := export(in, nil, options{out: filepath.Join(dir, "g2.mbox"), tmpdir: missing}); err == nil || !strings.Contains(err.Error(), missing) {
+		t.Errorf("-tmpdir %s: %v", missing, err)
 	}
 }

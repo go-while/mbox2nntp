@@ -276,7 +276,7 @@ func TestTooBig(t *testing.T) {
 		if !reflect.DeepEqual(items, want) {
 			t.Errorf("%s: %+v\nwant %+v", what, items, want)
 		}
-		if st.TooBig != 2 || st.DBs != 0 || st.Files != 1 || len(st.Problems) != 2 || !strings.Contains(st.Problems[0], "over the limit") {
+		if st.TooBig != 1 || st.BigDBs != 1 || st.DBs != 0 || st.Files != 1 || len(st.Problems) != 2 || !strings.Contains(st.Problems[0], "over the limit") {
 			t.Errorf("%s: stats %+v", what, st)
 		}
 	}
