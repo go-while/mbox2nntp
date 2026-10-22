@@ -1,10 +1,51 @@
 package unpack
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
+	"syscall"
 	"testing"
 )
+
+// The test binary run as a program that writes to its standard output
+// until the pipe breaks, for TestRunToWriteError.
+func init() {
+	if os.Getenv("UNPACK_TEST_WRITE_FOREVER") == "1" {
+		buf := make([]byte, 64*1024)
+		for {
+			if _, err := os.Stdout.Write(buf); err != nil {
+				os.Exit(1)
+			}
+		}
+	}
+}
+
+// When dst cannot be written, RunTo kills the program; the error must be
+// the write error, not the program's "signal: killed".
+func TestRunToWriteError(t *testing.T) {
+	t.Setenv("UNPACK_TEST_WRITE_FOREVER", "1")
+	prog, err := os.Executable()
+	if err != nil {
+		t.Skip(err)
+	}
+	cases := map[string]func(error) bool{
+		filepath.Join(t.TempDir(), "no-such-dir", "x"): func(err error) bool { return errors.Is(err, fs.ErrNotExist) },
+	}
+	if runtime.GOOS == "linux" {
+		// writes fail with ENOSPC, as on a full disk
+		cases["/dev/full"] = func(err error) bool { return errors.Is(err, syscall.ENOSPC) }
+	}
+	for dst, want := range cases {
+		err := RunTo(dst, prog, "-test.run=^$")
+		if err == nil || !want(err) || strings.Contains(err.Error(), "killed") {
+			t.Errorf("RunTo(%s) = %v, want the write error", dst, err)
+		}
+	}
+}
 
 func TestHas7zEntry(t *testing.T) {
 	listing := "\n7-Zip 25.01\n\nListing archive: x.mbox.7z\n\n--\nPath = x.mbox.7z\nType = 7z\n\n" +

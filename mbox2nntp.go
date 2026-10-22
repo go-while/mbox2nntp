@@ -258,6 +258,33 @@ func closeBackend(srvtp *textproto.Conn, cliwriter *bufio.Writer) {
 	srvtp.Close()
 }
 
+// pathSuffix turns an input file name into the suffix of our Path
+// element, "mbox2nntp" + suffix. RFC 5536 3.1.5 allows only letters,
+// digits, "-", ".", "_" and ":" in a path-identity, ending with a letter or
+// digit: "!" would split the element, and a space would end the field's
+// first word. Every other character, and each byte of a non-ASCII one,
+// becomes "_". A name with no letter or digit gives no suffix.
+func pathSuffix(name string) string {
+	b := []byte(name)
+	for i, c := range b {
+		if !isAlnum(c) && c != '-' && c != '.' && c != '_' && c != ':' {
+			b[i] = '_'
+		}
+	}
+	end := len(b)
+	for end > 0 && !isAlnum(b[end-1]) {
+		end--
+	}
+	if end == 0 {
+		return ""
+	}
+	return "-" + string(b[:end])
+}
+
+func isAlnum(c byte) bool {
+	return isDigit(c) || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 func fileExists(filename string) bool {
 	info, err := os.Stat(filename)
 	if err != nil {
@@ -589,10 +616,18 @@ func mvmbox(mboxfile string) {
 	}
 } // end func mvmbox
 
-func read_file(file_path string) string {
+func read_file(file_path string) (queued string) {
+	counted := false // too big or binary, counted as such
+	defer func() {
+		if queued == "" && !counted {
+			countDropped()
+		}
+	}()
 
 	if fi, err := os.Stat(file_path); err == nil && fi.Size() > int64(maxArticleSize) {
-		log.Printf("read_file(%s): %d bytes, %v, not sent", file_path, fi.Size(), errArticleTooBig)
+		log.Printf("read_file(%s): %d bytes, %v, not sent, counted as 437", file_path, fi.Size(), errArticleTooBig)
+		counted = true
+		countTooBig()
 		return ""
 	}
 	lines, err0 := ioutil.ReadFile(file_path)
@@ -701,6 +736,8 @@ func read_file(file_path string) string {
 		} else {
 			if DROPBINARY && strings.HasPrefix(line, "=ybegin") {
 				log.Printf("DROP BINARY file='%s'", file_path)
+				counted = true
+				countBinary()
 				return ""
 			}
 			/*
@@ -936,7 +973,7 @@ func main() {
 	mboxfileZ := ""
 	if is_zip || is_zip7 || is_gzp || is_mbx || is_bag || uatsuffix != "" {
 		mboxfileZ = mboxfile
-		my_mboxfile = "-" + filepath.Base(mboxfile)
+		my_mboxfile = pathSuffix(filepath.Base(mboxfile))
 		log.Printf("mboxfileZ = %s", mboxfileZ)
 	}
 
@@ -975,7 +1012,7 @@ func main() {
 	tnntp999 := globalCounter.getCounter("tnntp999")
 	tnntperr := globalCounter.getCounter("wnntperrcnt")
 
-	log.Printf("Done sending. %d/%d dup=%d e437=%d err=%d filter=%d", tsentcnt, ttot, tnntpdup435, tnntp437, tnntperr, tnntp999)
+	log.Printf("Done sending. %d/%d dup=%d e437=%d err=%d filter=%d dropped=%d binary=%d", tsentcnt, ttot, tnntpdup435, tnntp437, tnntperr, tnntp999, globalCounter.getCounter("dropped"), globalCounter.getCounter("binary"))
 	log.Printf("END: mboxfile='%s' took=%d remaining sent=%d", mboxfile, took, tsentcnt)
 
 	if DRYRUN {
@@ -1206,6 +1243,18 @@ func countTooBig() {
 	globalCounter.addCounter(0, "wnntperr437", 1)
 }
 
+// countDropped counts a message read but never offered to the server: no
+// Message-ID, no body, or not parseable. It is not in "total" and does not
+// keep the input from being marked done; a run reports it as "dropped".
+func countDropped() {
+	globalCounter.incCounter(0, "dropped")
+}
+
+// countBinary counts a yEnc article left out because of DROPBINARY.
+func countBinary() {
+	globalCounter.incCounter(0, "binary")
+}
+
 // readBody reads a message body into lines without their line endings.
 // isbinary is set, and the body left out, when DROPBINARY is on and a line
 // starts with "=ybegin". err is errArticleTooBig when the body is over
@@ -1262,6 +1311,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgcnt := 0
 	skipped := 0
 	tooBig := 0 // over maxArticleSize
+	noMsgid, binary, empty := 0, 0, 0
 	var lastReadErr, prevErr error
 	stoppedEarly := false
 	//msgidmap := make(map[string]int)
@@ -1292,6 +1342,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 				break
 			}
 			skipped++
+			countDropped()
 			lastReadErr, prevErr = err, err
 			log.Printf("[iterateMbox] ERROR: mboxreader skipped a message file='%s' err='%v' msgNumber=%d", mboxfile, err, msgNumber)
 			continue
@@ -1337,15 +1388,21 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			err = nil
 		}
 
-		if msgid == "" || err != nil || isbinary {
-
-			//log.Printf("[iterateMbox] E2) overview.GetMessageID msgNumber=%d msgid='%s' err='%v' isbinary=%t", msgNumber, msgid, err, isbinary)
-			//time.Sleep(5 * time.Second)
+		if msgid == "" || err != nil {
+			noMsgid++
+			countDropped()
+			continue
+		}
+		if isbinary {
+			binary++
+			countBinary()
 			continue
 		}
 		body = body_remove_finalemptylines(body)
 		if len(body) == 0 || len(head) == 0 {
 			log.Printf("ERROR head=%d body=%d msgid='%s'", len(head), len(body), msgid)
+			empty++
+			countDropped()
 			continue
 		}
 
@@ -1364,7 +1421,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 	}
 	nearMisses, nearMissSamples := mboxReader.NearMisses()
-	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d too-big=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, tooBig, nearMisses, stoppedEarly, lastReadErr)
+	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d no-msgid=%d empty=%d binary=%d too-big=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, noMsgid, empty, binary, tooBig, nearMisses, stoppedEarly, lastReadErr)
 	// near-misses are body lines starting "From " or "#! rnews " that validid
 	// rejected: either ordinary text, or a separator shape validid does not
 	// know, in which case articles were merged. The samples tell which.
@@ -1408,7 +1465,7 @@ func finishFeeding(stoppedEarly bool) {
 	tnntp999 := globalCounter.getCounter("tnntp999")
 	terrcnt := globalCounter.getCounter("wnntperrcnt")
 
-	log.Printf("Done sending iterateMbox. %d/%d dup=%d e437=%d err=%d filter=%d", tsentcnt, ttot, tnntpdup435, tnntp437, terrcnt, tnntp999)
+	log.Printf("Done sending iterateMbox. %d/%d dup=%d e437=%d err=%d filter=%d dropped=%d binary=%d", tsentcnt, ttot, tnntpdup435, tnntp437, terrcnt, tnntp999, globalCounter.getCounter("dropped"), globalCounter.getCounter("binary"))
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot || tsentcnt+tnntpdup435+tnntp437 == ttot ) && terrcnt == 0 {
 	//if ttot > 0 && (tsentcnt == ttot || tsentcnt+tnntpdup435+tnntp999 == ttot) && terrcnt == 0 {
 	// workers that gave up connecting leave articles queued but unsent

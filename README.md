@@ -357,7 +357,9 @@ Articles are sent as stored, apart from these changes to the header:
 
 - `Path:` gets `mbox2nntp-INPUTNAME!` prepended; an article without one gets
   `Path: mbox2nntp-INPUTNAME!not-for-mail`. In directory mode `INPUTNAME` is empty, giving
-  `mbox2nntp!`.
+  `mbox2nntp!`. In `INPUTNAME` every character a Path element may not hold (RFC 5536:
+  letters, digits, `-`, `.`, `_` and `:`) becomes `_`, so `my news!x.mbox` gives
+  `mbox2nntp-my_news_x.mbox!`.
 - `Xref:`, `Expires:` and stray mbox `From ` lines are dropped, with their continuation
   lines.
 - `Message-ID:` is reduced to the one the article is fed under.
@@ -403,20 +405,25 @@ binaries, `patch*`, and names containing `)`.
 The summary line at the end:
 
 ```
-Done sending. 1465/1467 dup=0 e437=2 err=0 filter=0
+Done sending. 1465/1467 dup=0 e437=2 err=0 filter=0 dropped=0 binary=0
 ```
 
 That is sent out of total, then duplicates, rejections and errors. In a dry run, `sent`
 counts the articles that would have been offered. `filter` is a leftover
-and always 0. For mbox inputs, the
+and always 0. `dropped` counts messages read but never offered: no Message-ID, no body,
+or not parseable. `binary` counts yEnc articles left out. Neither is in the total, and
+neither keeps the input from being marked done. For mbox inputs, the
 parser reports per file:
 
 ```
-[iterateMbox] Done read mbox file='...' msgNumber=1467 skipped=0 too-big=0 near-misses=0 stopped-early=false last-err=<nil>
+[iterateMbox] Done read mbox file='...' msgNumber=1467 skipped=0 no-msgid=0 empty=0 binary=0 too-big=0 near-misses=0 stopped-early=false last-err=<nil>
 ```
 
 - `skipped`: malformed messages the parser stepped over. The rest of the file is still
   read.
+- `no-msgid`, `empty`: messages without a Message-ID, or without a body. With `skipped`
+  they make up `dropped`.
+- `binary`: yEnc articles left out (see `-keep-binary`).
 - `too-big`: articles with a body over 1 MiB, not sent, and counted as `e437`.
 - `stopped-early=true`: the parser lost its place before the end of the file, or a read
   error ended it, so the input is not marked done. Look at `last-err` and the `ERROR`

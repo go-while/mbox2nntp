@@ -62,16 +62,19 @@ func procUAT(input, suffix string) string {
 		_, _, msgid, err := ParseHeaderKeys(head, LAXMID)
 		if msgid == "" || err != nil {
 			nomsgid++
+			countDropped()
 			log.Printf("[procUAT] '%s' message %d: no Message-ID: %v", path, i, err)
 			return nil
 		}
 		if DROPBINARY && hasYEnc(body) {
 			binary++
+			countBinary()
 			return nil
 		}
 		body = body_remove_finalemptylines(body)
 		if len(body) == 0 {
 			empty++
+			countDropped()
 			return nil
 		}
 		if (i+1)%10000 == 0 {

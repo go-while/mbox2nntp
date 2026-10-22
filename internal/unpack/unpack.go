@@ -96,7 +96,9 @@ func UnXzTo(archive, dst string) error {
 }
 
 // RunTo runs prog with args and writes its standard output to dst. A
-// failing program is an error even when it wrote something.
+// failing program is an error even when it wrote something. When writing
+// dst fails, as on a full disk, that is the error: the program is killed
+// then, and its "signal: killed" says nothing.
 func RunTo(dst, prog string, args ...string) error {
 	var stderr bytes.Buffer
 	cmd := exec.Command(prog, args...)
@@ -108,14 +110,15 @@ func RunTo(dst, prog string, args ...string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	werr := WriteTo(dst, stdout)
-	if werr != nil {
+	if werr := WriteTo(dst, stdout); werr != nil {
 		cmd.Process.Kill() // it would block on a full pipe
+		cmd.Wait()
+		return fmt.Errorf("writing %s: %w", dst, werr)
 	}
 	if err := cmd.Wait(); err != nil {
 		return fmt.Errorf("%s %s: %v: %s", filepath.Base(prog), args[0], err, strings.TrimSpace(stderr.String()))
 	}
-	return werr
+	return nil
 }
 
 // Has7zEntry reports whether the output of "7z l -slt" lists a top-level

@@ -1341,4 +1341,95 @@ func TestReadFileTooBig(t *testing.T) {
 	if msgid := read_file(fp); msgid != "" || len(worker_channel) != 1 {
 		t.Errorf("over the limit: read_file = %q, queued %d; want dropped", msgid, len(worker_channel))
 	}
+	// counted as a 437, as in mbox mode, and not as dropped
+	if total, e437, dropped := globalCounter.getCounter("total"), globalCounter.getCounter("wnntperr437"), globalCounter.getCounter("dropped"); total != 1 || e437 != 1 || dropped != 0 {
+		t.Errorf("over the limit: total %d, e437 %d, dropped %d; want 1, 1, 0", total, e437, dropped)
+	}
+}
+
+// Messages read but not offered are counted: "dropped" for no Message-ID,
+// no body or a parse error, "binary" for yEnc. Neither is in "total", and
+// neither keeps the input from being done. They used to go uncounted.
+func TestIterateMboxDropped(t *testing.T) {
+	savedDry, savedMax := DRYRUN, MaxWorkers
+	t.Cleanup(func() { DRYRUN, MaxWorkers = savedDry, savedMax })
+	DRYRUN, MaxWorkers = true, 1
+	const sep = "From nobody Thu Dec  8 12:55:04 2016\n"
+	const head = "Subject: s\nFrom: a@b.c\nDate: Thu, 8 Dec 2016 12:55:04 +0000\nNewsgroups: x.test\n"
+	in := sep + head + "Message-ID: <a@test>\n\nbody\n" +
+		sep + head + "\nno Message-ID\n" +
+		sep + head + "Message-ID: <empty@test>\n\n\n" +
+		sep + head + "Message-ID: <yenc@test>\n\n=ybegin line=128 size=3 name=x\nabc\n=yend size=3\n" +
+		sep + "not a header\n\nbody\n" +
+		sep + head + "Message-ID: <b@test>\n\nbody\n"
+	mr, err := mbox.CreateMboxStream(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortTimeouts(t)
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	worker_channel = make(chan *ArticleItem, 10)
+	returned := make(chan bool)
+	go func() { worker(1); close(returned) }()
+	iterateMbox(mr, &eofReader{r: strings.NewReader(""), sawEOF: true}, "dropped")
+	<-returned
+	for name, want := range map[string]int{"sent": 2, "total": 2, "dropped": 3, "binary": 1} {
+		if got := globalCounter.getCounter(name); got != want {
+			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+	}
+	if !globalBools.GetGB("done") {
+		t.Error("done = false, want true")
+	}
+}
+
+// Directory mode counts its drops the same way.
+func TestReadFileDropped(t *testing.T) {
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	worker_channel = make(chan *ArticleItem, 8)
+	dir := t.TempDir()
+	const head = "From: a@b.c\nSubject: s\nDate: Mon, 30 Jun 2003 23:33:23 GMT\n"
+	for name, art := range map[string]string{
+		"nomsgid": head + "\nbody\n",
+		"empty":   head + "Message-ID: <empty@test>\n\n",
+		"yenc":    head + "Message-ID: <yenc@test>\n\n=ybegin line=128 size=3 name=x\nabc\n=yend size=3\n",
+		"ok":      head + "Message-ID: <ok@test>\n\nbody\n",
+	} {
+		fp := filepath.Join(dir, name)
+		if err := os.WriteFile(fp, []byte(art), 0644); err != nil {
+			t.Fatal(err)
+		}
+		read_file(fp)
+	}
+	if len(worker_channel) != 1 {
+		t.Errorf("queued %d, want 1", len(worker_channel))
+	}
+	for name, want := range map[string]int{"dropped": 2, "binary": 1, "total": 0} {
+		if got := globalCounter.getCounter(name); got != want {
+			t.Errorf("%s = %d, want %d", name, got, want)
+		}
+	}
+}
+
+// The input name goes into our Path element: only what RFC 5536 allows in
+// a path-identity may stay.
+func TestPathSuffix(t *testing.T) {
+	for name, want := range map[string]string{
+		"x.mbox.gz":                  "-x.mbox.gz",
+		"0.akita-inu.(1825).mbox.7z": "-0.akita-inu._1825_.mbox.7z",
+		"my news!x.mbox":             "-my_news_x.mbox",
+		"a\tb\r\nc":                  "-a_b__c",
+		"grüße.mbox":                 "-gr____e.mbox",
+		"c:x_":                       "-c:x",
+		"x.mbox~":                    "-x.mbox",
+		"_-.":                        "",
+		"!!":                         "",
+		"":                           "",
+	} {
+		if got := pathSuffix(name); got != want {
+			t.Errorf("pathSuffix(%q) = %q, want %q", name, got, want)
+		}
+	}
 }
