@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -59,10 +60,11 @@ Flags:
 `
 
 type options struct {
-	out    string
-	gzip   int
-	dedup  bool
-	tmpdir string
+	out     string
+	gzip    int
+	dedup   bool
+	tmpdir  string
+	missing string
 }
 
 // sizeFlag is a size in bytes, given as a number with an optional K, M, G
@@ -129,7 +131,8 @@ func main() {
 	fs.Var(mboxout.GzipFlag{Level: &o.gzip}, "gzip", "gzip the mbox, to NAME.mbox.gz; -gzip=N sets the level, from 1 (fastest) to 9 (smallest), default 6")
 	fs.BoolVar(&o.dedup, "dedup", true, "write an article seen in several groups once, by Message-ID")
 	fs.Var(sizeFlag{&newscache.MaxDBSize}, "max-db", "skip a .db over `SIZE`, such as 16G; 0 for no limit. 4G is the most a 32-bit NewsCache can write; one from a 64-bit build can be bigger")
-	fs.StringVar(&o.tmpdir, "tmpdir", "", "`DIR` for the temporary copy of a .db over 1 MiB from a tarball (default: the output's directory)")
+	fs.StringVar(&o.missing, "missing", "", "write the articles a .db lists that are in neither the spool nor the export to `FILE`, tab-separated: group, number, date, subject, from, Message-ID. One crossposted to another group is found there, by Message-ID, and not written")
+	fs.StringVar(&o.tmpdir, "tmpdir", "", "`DIR` for temporary files: the copy of a .db over 1 MiB from a tarball, and the listed articles for -missing (default: the output's directory)")
 	showVersion := fs.Bool("version", false, "print the version and exit")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), usage, filepath.Base(os.Args[0]))
@@ -164,6 +167,15 @@ type stats struct {
 	newscache.Stats
 	out                    string
 	n, dups, noID, oddDots int
+	missingFile            string // -missing
+	listedFound, lost      int    // of Missing: exported from another group, or not
+}
+
+func (st stats) missingWhat() string {
+	if st.missingFile == "" {
+		return "listed in .db without an .art file (mostly crossposts stored under another group; -missing FILE lists the others)"
+	}
+	return fmt.Sprintf("listed in .db without an .art file: %d of them exported from another group, %d lost, listed in %s", st.listedFound, st.lost, st.missingFile)
 }
 
 func (st stats) summary(input string) string {
@@ -176,7 +188,7 @@ func (st stats) summary(input string) string {
 		{st.dups, "crossposted copies skipped"},
 		{st.noID, "without Message-ID"},
 		{st.oddDots, `with a line starting with a single "." (kept)`},
-		{st.Missing, "listed in .db but not in the spool"},
+		{st.Missing, st.missingWhat()},
 		{st.BadDBs, ".db files unreadable"},
 		{st.TooBig, "articles over 1 MiB skipped"},
 		{st.BigDBs, ".db files over -max-db (" + formatSize(newscache.MaxDBSize) + ") skipped: their articles are missing, raise -max-db"},
@@ -240,30 +252,128 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 	if newscache.TempDir == "" {
 		newscache.TempDir = filepath.Dir(st.out)
 	}
+	seen := map[string]bool{}
+	var mf *missingFile
+	if o.missing != "" {
+		if mf, err = createMissing(o.missing); err != nil {
+			return st, err
+		}
+		st.missingFile = o.missing
+		// called after the last article: seen holds every Message-ID written
+		newscache.Missing = func(l newscache.Listed) error {
+			if len(l.Overview) > 4 && seen[strings.TrimSpace(l.Overview[4])] {
+				st.listedFound++
+				return nil
+			}
+			st.lost++
+			return mf.write(l)
+		}
+		defer func() { newscache.Missing = nil }()
+	}
 	w, err := mboxout.Create(st.out, o.gzip)
 	if err != nil {
+		mf.abort()
 		return st, err
 	}
-	seen := map[string]bool{}
 	st.Stats, err = read(func(it newscache.Item) error {
 		head, body, odd := newscache.Split(it.Text)
 		if odd {
 			st.oddDots++
 		}
-		if id := messageID(head); id == "" {
+		switch id := messageID(head); {
+		case id == "":
 			st.noID++
-		} else if o.dedup && !firstSeen(seen, id) {
-			st.dups++
-			return nil
+		case o.dedup || mf != nil:
+			// -missing looks crossposts up in seen too
+			if !firstSeen(seen, id) && o.dedup {
+				st.dups++
+				return nil
+			}
 		}
 		st.n++
 		return w.Write(head, body)
 	})
+	if err == nil {
+		err = mf.close()
+	}
 	if err != nil {
 		w.Abort()
+		mf.abort()
 		return st, err
 	}
 	return st, w.Close()
+}
+
+// missingFile is the file -missing writes. As the mbox, it is written
+// under a temporary name, removed on a signal, and renamed when complete;
+// an existing one is not replaced.
+type missingFile struct {
+	path string
+	f    *os.File
+	w    *bufio.Writer
+}
+
+func createMissing(path string) (*missingFile, error) {
+	path = filepath.Clean(path)
+	if err := mboxout.MustNotExist(path); err != nil {
+		return nil, err
+	}
+	f, err := os.CreateTemp(mboxout.TempName(path))
+	if err != nil {
+		return nil, err
+	}
+	mboxout.AddTemp(f.Name())
+	m := &missingFile{path, f, bufio.NewWriter(f)}
+	m.w.WriteString("group\tnumber\tdate\tsubject\tfrom\tmessage-id\n")
+	return m, nil
+}
+
+func (m *missingFile) write(l newscache.Listed) error {
+	field := func(i int) string {
+		if i < len(l.Overview) {
+			return oneField(l.Overview[i])
+		}
+		return ""
+	}
+	_, err := fmt.Fprintf(m.w, "%s\t%d\t%s\t%s\t%s\t%s\n", oneField(l.Group), l.Num, field(3), field(1), field(2), field(4))
+	return err
+}
+
+// oneField turns tabs and line ends into spaces. An overview field holds
+// none; a broken one, or a crafted group name, might.
+func oneField(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
+func (m *missingFile) close() error {
+	if m == nil {
+		return nil
+	}
+	err := m.w.Flush()
+	if cerr := m.f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Chmod(m.f.Name(), 0644) // os.CreateTemp makes it 0600
+	}
+	if err != nil {
+		mboxout.RemoveTemp(m.f.Name())
+		return err
+	}
+	return mboxout.Commit(m.f.Name(), m.path)
+}
+
+// abort removes the unfinished file after a failed export.
+func (m *missingFile) abort() {
+	if m != nil {
+		m.f.Close()
+		mboxout.RemoveTemp(m.f.Name())
+	}
 }
 
 // messageID is the Message-ID header's value, unfolded, or "".

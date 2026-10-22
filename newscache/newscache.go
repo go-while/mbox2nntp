@@ -39,6 +39,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-while/mbox2nntp/internal/mboxout"
 )
 
 // Record types.
@@ -290,8 +292,28 @@ var (
 )
 
 // TempDir is where a .db from a tarball over 1 MiB is copied while it is
-// read; empty means os.TempDir().
+// read, and where Missing's records wait for the end; empty means
+// os.TempDir().
 var TempDir string
+
+// A Listed is an article a .db lists by its overview line, without the
+// article: no .artN file, and not inside the .db. Usually the article was
+// stored under another group it was crossposted to, or never fetched.
+type Listed struct {
+	Group string
+	Num   uint64
+	// The overview's first fields: number, subject, from, date and
+	// Message-ID, fewer when the line has fewer.
+	Overview []string
+}
+
+// Missing, when set, is called by ReadTar and ReadDir after the last
+// article for each Listed, in the order of the .db files. Which articles
+// a spool holds is known only at the end: a tarball has a group's .db
+// before its .artN files. Until then the overview fields of every listed
+// article wait in a temporary file in TempDir, about 150 bytes each. An
+// error from Missing stops it and is returned.
+var Missing func(Listed) error
 
 // A .db from a tarball up to this size is read into memory; a bigger one
 // is copied to a temporary file, as ReadDB needs to read it out of order.
@@ -321,6 +343,94 @@ type scan struct {
 	st     Stats
 	fn     func(Item) error
 	groups map[string]*nums
+	listed *os.File      // Missing's records, when Missing is set
+	lw     *bufio.Writer // writes to listed
+}
+
+// keepListed writes a listed article for Missing: the group, the number,
+// and the overview's first five fields, each with its length before it.
+func (s *scan) keepListed(group string, rec Record) error {
+	if s.listed == nil {
+		f, err := os.CreateTemp(TempDir, "newscache-listed-*")
+		if err != nil {
+			return err
+		}
+		mboxout.AddTemp(f.Name()) // see tarDB
+		s.listed, s.lw = f, bufio.NewWriterSize(f, 1<<16)
+	}
+	fields := bytes.SplitN(rec.Data, []byte("\t"), 6)
+	fields = fields[:min(len(fields), 5)]
+	var b []byte
+	b = binary.AppendUvarint(b, uint64(len(group)))
+	b = append(b, group...)
+	b = binary.AppendUvarint(b, rec.Num)
+	b = binary.AppendUvarint(b, uint64(len(fields)))
+	for _, f := range fields {
+		b = binary.AppendUvarint(b, uint64(len(f)))
+		b = append(b, f...)
+	}
+	_, err := s.lw.Write(b)
+	return err
+}
+
+// readListed reads back what keepListed wrote, and calls Missing for each
+// article no .artN file turned up for.
+func (s *scan) readListed() error {
+	if err := s.lw.Flush(); err != nil {
+		return err
+	}
+	if _, err := s.listed.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	r := bufio.NewReaderSize(s.listed, 1<<16)
+	str := func() (string, error) {
+		n, err := binary.ReadUvarint(r)
+		if err != nil {
+			return "", err
+		}
+		b := make([]byte, n)
+		_, err = io.ReadFull(r, b)
+		return string(b), err
+	}
+	for {
+		group, err := str()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reading back the listed articles: %w", err)
+		}
+		num, err := binary.ReadUvarint(r)
+		if err != nil {
+			return fmt.Errorf("reading back the listed articles: %w", err)
+		}
+		n, err := binary.ReadUvarint(r)
+		if err != nil {
+			return fmt.Errorf("reading back the listed articles: %w", err)
+		}
+		l := Listed{Group: group, Num: num}
+		for range n {
+			f, err := str()
+			if err != nil {
+				return fmt.Errorf("reading back the listed articles: %w", err)
+			}
+			l.Overview = append(l.Overview, f)
+		}
+		if _, found := slices.BinarySearch(s.groups[group].files, num); found {
+			continue
+		}
+		if err := Missing(l); err != nil {
+			return err
+		}
+	}
+}
+
+// close removes Missing's temporary file.
+func (s *scan) close() {
+	if s.listed != nil {
+		s.listed.Close()
+		mboxout.RemoveTemp(s.listed.Name())
+	}
 }
 
 // The article numbers of a group: listed in .db without the article, and
@@ -353,7 +463,7 @@ func (s *scan) problem(format string, a ...any) {
 func (s *scan) db(group, name string, r io.ReaderAt, size int64, emit func(Item) error) error {
 	g := s.group(group)
 	s.st.DBs++
-	var emitErr error
+	var emitErr error // from emit or keepListed: stops the reading
 	_, err := ReadDB(r, size, func(rec Record) error {
 		switch {
 		case rec.Data == nil && rec.Size > MaxArticleSize:
@@ -365,6 +475,10 @@ func (s *scan) db(group, name string, r io.ReaderAt, size int64, emit func(Item)
 			return emitErr
 		case rec.Type == Overview || rec.Type == BigArticle:
 			g.listed = append(g.listed, rec.Num)
+			if Missing != nil {
+				emitErr = s.keepListed(group, rec)
+				return emitErr
+			}
 		default:
 			s.problem("%s: article %d: record type %d", name, rec.Num, rec.Type)
 		}
@@ -394,7 +508,10 @@ func (s *scan) tarDB(group, name string, tr io.Reader, size int64) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(f.Name())
+	// also removed when a signal ends a program that asked for that with
+	// mboxout.RemoveTempsOnSignal, as ncexport does
+	mboxout.AddTemp(f.Name())
+	defer mboxout.RemoveTemp(f.Name())
 	defer f.Close()
 	n, err := io.Copy(f, tr)
 	if err != nil {
@@ -410,7 +527,7 @@ func (s *scan) file(group string, num uint64, text []byte) error {
 	return s.fn(Item{Group: group, Num: num, Text: text})
 }
 
-func (s *scan) finish() Stats {
+func (s *scan) finish() (Stats, error) {
 	for _, g := range s.groups {
 		s.st.Listed += len(g.listed)
 		slices.Sort(g.files)
@@ -420,7 +537,12 @@ func (s *scan) finish() Stats {
 			}
 		}
 	}
-	return s.st
+	if s.listed != nil {
+		if err := s.readListed(); err != nil {
+			return s.st, err
+		}
+	}
+	return s.st, nil
 }
 
 // ReadTar reads a tar archive of a spool, gzipped or not, and calls fn for
@@ -429,6 +551,7 @@ func (s *scan) finish() Stats {
 // in the archive. An error from fn stops the reading and is returned.
 func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 	s := newScan(fn)
+	defer s.close()
 	br := bufio.NewReaderSize(r, 1<<16)
 	var in io.Reader = br
 	var zr *gzip.Reader
@@ -451,7 +574,7 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 					return s.st, fmt.Errorf("after the last tar entry: %w", err)
 				}
 			}
-			return s.finish(), nil
+			return s.finish()
 		}
 		if err != nil {
 			return s.st, err
@@ -492,6 +615,7 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 // top of a hierarchy (babbel-net) or a group directory.
 func ReadDir(root string, fn func(Item) error) (Stats, error) {
 	s := newScan(fn)
+	defer s.close()
 	parent := filepath.Dir(filepath.Clean(root))
 	err := filepath.WalkDir(root, func(dir string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -580,5 +704,5 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 	if err != nil {
 		return s.st, err
 	}
-	return s.finish(), nil
+	return s.finish()
 }

@@ -7,6 +7,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"flag"
+	"fmt"
 	"io"
 	"math"
 	"os"
@@ -306,5 +307,53 @@ func TestFirstSeenCopies(t *testing.T) {
 		if k != "<cross@x>" || unsafe.StringData(k) == unsafe.StringData(id) {
 			t.Errorf("key %q shares the article's memory", k)
 		}
+	}
+}
+
+// -missing writes the listed articles that are in neither the spool nor
+// the export; one exported from another group, a crosspost, is not.
+func TestMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	files := spool()
+	files["h/one/.db"] = newscachetest.DB(binary.LittleEndian, 8, 1, 4, map[uint64]newscachetest.Record{
+		1: {Type: newscachetest.Overview, Data: "1\tcross"},
+		2: {Type: newscachetest.Article, Data: inline},
+		3: {Type: newscachetest.Overview, Data: "3\tgone\ta@b\tSat, 3 Jan 2004 02:40:01 +0000\t<gone@x>\t\t100\t3\t"},
+		// stored as h/two/.art7
+		4: {Type: newscachetest.Overview, Data: "4\tcross\ta@b\tSat, 3 Jan 2004 02:40:01 +0000\t <cross@x>\t\t100\t3\t"},
+	})
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range order {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(files[name]))})
+		tw.Write(files[name])
+	}
+	tw.Close()
+	in := filepath.Join(dir, "h.tar")
+	if err := os.WriteFile(in, buf.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, dedup := range []bool{true, false} {
+		missing := filepath.Join(dir, fmt.Sprintf("missing-%t.tsv", dedup))
+		st, err := export(in, nil, options{out: filepath.Join(dir, fmt.Sprintf("h-%t.mbox", dedup)), dedup: dedup, missing: missing})
+		if err != nil || st.Missing != 2 || st.listedFound != 1 || st.lost != 1 {
+			t.Fatalf("dedup=%t: %+v, %v", dedup, st, err)
+		}
+		got, _ := os.ReadFile(missing)
+		want := "group\tnumber\tdate\tsubject\tfrom\tmessage-id\nh.one\t3\tSat, 3 Jan 2004 02:40:01 +0000\tgone\ta@b\t<gone@x>\n"
+		if string(got) != want {
+			t.Errorf("dedup=%t: %q\nwant %q", dedup, got, want)
+		}
+		if s := st.summary(in); !strings.Contains(s, "2 listed in .db without an .art file: 1 of them exported from another group, 1 lost, listed in "+missing) {
+			t.Errorf("summary: %s", s)
+		}
+	}
+	// an existing file is not replaced, and nothing is written
+	missing := filepath.Join(dir, "missing-true.tsv")
+	if _, err := export(in, nil, options{out: filepath.Join(dir, "again.mbox"), missing: missing}); err == nil {
+		t.Error("existing -missing file: no error")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "again.mbox")); err == nil {
+		t.Error("existing -missing file: the mbox was written")
 	}
 }

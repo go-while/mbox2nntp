@@ -427,3 +427,45 @@ func TestReadTarDBTempFile(t *testing.T) {
 		t.Errorf("temporary files left: %v", left)
 	}
 }
+
+// Missing gets the listed articles no .artN file turned up for, after the
+// last article; in a tarball a group's .db comes before its .artN files.
+func TestMissing(t *testing.T) {
+	t.Cleanup(func() { Missing = nil; TempDir = "" })
+	TempDir = t.TempDir()
+	var got []Listed
+	Missing = func(l Listed) error {
+		got = append(got, l)
+		return nil
+	}
+	want := []Listed{{Group: "x.y", Num: 5, Overview: []string{"5", "gone", "a@b", "date", "<gone@x>"}}}
+	files := spool()
+	data := writeTar(t, files, []string{"x/y/.db", "x/y/.art2", "x/y/z/.art1"}, true)
+	st, err := ReadTar(bytes.NewReader(data), func(Item) error { return nil })
+	if err != nil || !reflect.DeepEqual(got, want) || st.Missing != 1 {
+		t.Errorf("tar: %+v, %d missing, %v", got, st.Missing, err)
+	}
+
+	root := filepath.Join(t.TempDir(), "x")
+	for name, data := range files {
+		p := filepath.Join(filepath.Dir(root), filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		if err := os.WriteFile(p, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got = nil
+	if _, err := ReadDir(root, func(Item) error { return nil }); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("dir: %+v, %v", got, err)
+	}
+
+	// an error from Missing comes back
+	stop := errors.New("stop")
+	Missing = func(Listed) error { return stop }
+	if _, err := ReadTar(bytes.NewReader(data), func(Item) error { return nil }); err != stop {
+		t.Errorf("Missing's error: %v", err)
+	}
+	if left, _ := os.ReadDir(TempDir); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}

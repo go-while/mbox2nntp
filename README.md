@@ -255,8 +255,18 @@ an existing one is never replaced.
   group and by article number. The mbox is mboxrd, with `From nobody DATE` taken from the
   Date header, as uatexport writes it.
 - **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
-  files. It also counts the crossposted copies skipped, and the articles the `.db` lists
-  but the spool does not have (overview only, never fetched by the cache).
+  files. It also counts the crossposted copies skipped, and the articles a `.db` lists
+  without an `.art` file.
+- **Listed but not stored: `-missing FILE`.** A group's `.db` lists every article by its
+  overview line, but NewsCache stored a crossposted article once, under one of its groups.
+  So most listed articles without an `.art` file are in the export after all, from another
+  group. In `sci.tar.gz` (textusenet-backup_s) that is 2,003,281 of 2,136,368. `-missing
+  FILE` looks each one up by Message-ID and writes the others, the articles that are
+  really missing, to FILE: one line each with group, number, date, subject, from and
+  Message-ID, tab-separated, to find them in other archives. The summary then splits the
+  count. Until the end, the overview fields of the listed articles wait in a temporary file
+  in `-tmpdir`, about 150 bytes each, as a tarball holds a group's `.db` before its
+  articles. Articles crossposted to a hierarchy in another tarball count as missing.
 - **The `.db`.** It is read one record at a time, never whole: the table of record offsets
   through a buffer, then each record where the table points. NewsCache places records and
   the table anywhere in the file, so it cannot be read front to back. A big group's `.db`
