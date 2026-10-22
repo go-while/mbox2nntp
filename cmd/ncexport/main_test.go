@@ -357,3 +357,68 @@ func TestMissingFile(t *testing.T) {
 		t.Error("existing -missing file: the mbox was written")
 	}
 }
+
+// eofHook runs fn once when r reaches its end.
+type eofHook struct {
+	r    io.Reader
+	fn   func()
+	done bool
+}
+
+func (h *eofHook) Read(p []byte) (int, error) {
+	n, err := h.r.Read(p)
+	if err == io.EOF && !h.done {
+		h.done = true
+		h.fn()
+	}
+	return n, err
+}
+
+// The mbox is committed before the -missing file: when the mbox fails at
+// the end, here because its name turned up meanwhile, no missing list is
+// left to block the rerun.
+func TestMissingAfterMbox(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "h.mbox")
+	missing := filepath.Join(dir, "missing.tsv")
+	in := &eofHook{r: bytes.NewReader(tarball(t, true)), fn: func() { os.WriteFile(out, []byte("someone else"), 0644) }}
+	if _, err := export("-", in, options{out: out, dedup: true, missing: missing}); err == nil {
+		t.Fatal("the mbox's name taken: no error")
+	}
+	if _, err := os.Stat(missing); err == nil {
+		t.Errorf("no mbox, but %s was written", missing)
+	}
+	os.Remove(out)
+	if _, err := export("-", bytes.NewReader(tarball(t, false)), options{out: out, dedup: true, missing: missing}); err != nil {
+		t.Errorf("rerun: %v", err)
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, ".*.tmp"))
+	if len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
+}
+
+// -missing naming the output is refused before anything is read.
+func TestMissingSameAsOut(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "h.mbox")
+	_, err := export("-", bytes.NewReader(tarball(t, false)), options{out: out, missing: filepath.Join(dir, ".", "h.mbox")})
+	if err == nil || !strings.Contains(err.Error(), "is the output") {
+		t.Errorf("err = %v", err)
+	}
+	if _, err := os.Stat(out); err == nil {
+		t.Error("the mbox was written")
+	}
+}
+
+// A -tmpdir that cannot be used is an error at the start, not at the
+// first big .db.
+func TestTmpdirCheckedFirst(t *testing.T) {
+	dir := t.TempDir()
+	read := false
+	in := &eofHook{r: bytes.NewReader(tarball(t, false)), fn: func() { read = true }}
+	_, err := export("-", in, options{out: filepath.Join(dir, "h.mbox"), tmpdir: filepath.Join(dir, "no-such-dir")})
+	if err == nil || !strings.Contains(err.Error(), "-tmpdir") || read {
+		t.Errorf("err = %v, input read: %t", err, read)
+	}
+}

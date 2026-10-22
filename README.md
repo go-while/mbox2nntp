@@ -433,7 +433,8 @@ That is sent out of total, then duplicates, rejections and errors. In a dry run,
 counts the articles that would have been offered. `filter` is a leftover
 and always 0. `dropped` counts messages read but never offered: no Message-ID, no body,
 or not parseable. `binary` counts yEnc articles left out. Neither is in the total, and
-neither keeps the input from being marked done. For mbox inputs, the
+neither keeps the input from being marked done, except when every message was dropped
+and none offered: that more likely means a separator shape the parser does not know. For mbox inputs, the
 parser reports per file:
 
 ```

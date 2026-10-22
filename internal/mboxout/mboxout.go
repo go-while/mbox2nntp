@@ -51,17 +51,25 @@ func (g GzipFlag) Set(s string) error {
 }
 
 // Temporary files and directories, removed by RemoveTemps when a signal
-// ends the program.
+// ends the program; an open file is closed first.
 var (
 	tempMu sync.Mutex
-	temps  = map[string]bool{}
+	temps  = map[string]*os.File{}
 )
 
 // AddTemp registers path for removal on a signal.
 func AddTemp(path string) {
 	tempMu.Lock()
 	defer tempMu.Unlock()
-	temps[path] = true
+	temps[path] = nil
+}
+
+// AddTempFile registers an open file for removal on a signal. It is closed
+// first: Windows does not remove an open file.
+func AddTempFile(f *os.File) {
+	tempMu.Lock()
+	defer tempMu.Unlock()
+	temps[f.Name()] = f
 }
 
 // RemoveTemp removes path, a file or a directory tree.
@@ -76,7 +84,10 @@ func RemoveTemp(path string) {
 // to exit.
 func RemoveTemps() {
 	tempMu.Lock()
-	for path := range temps {
+	for path, f := range temps {
+		if f != nil {
+			f.Close()
+		}
 		os.RemoveAll(path)
 	}
 }
@@ -146,7 +157,7 @@ func Create(path string, level int) (*Writer, error) {
 	if err != nil {
 		return nil, err
 	}
-	AddTemp(f.Name())
+	AddTempFile(f)
 	m := &Writer{path: path, f: f}
 	var w io.Writer = f
 	if level != 0 {

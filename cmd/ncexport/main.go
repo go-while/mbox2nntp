@@ -19,6 +19,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -251,10 +252,16 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 	newscache.TempDir = o.tmpdir
 	if newscache.TempDir == "" {
 		newscache.TempDir = filepath.Dir(st.out)
+	} else if err := writableDir(o.tmpdir); err != nil {
+		// now, not at the first big .db, minutes into the run
+		return st, fmt.Errorf("-tmpdir: %w", err)
 	}
 	seen := map[string]bool{}
 	var mf *missingFile
 	if o.missing != "" {
+		if samePath(o.missing, st.out) {
+			return st, fmt.Errorf("-missing %s is the output", o.missing)
+		}
 		if mf, err = createMissing(o.missing); err != nil {
 			return st, err
 		}
@@ -293,15 +300,43 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 		st.n++
 		return w.Write(head, body)
 	})
-	if err == nil {
-		err = mf.close()
-	}
 	if err != nil {
 		w.Abort()
 		mf.abort()
 		return st, err
 	}
-	return st, w.Close()
+	// the mbox first: a missing list left without its mbox would make the
+	// rerun refuse to start
+	if err := w.Close(); err != nil {
+		mf.abort()
+		return st, err
+	}
+	return st, mf.close()
+}
+
+// writableDir checks that a file can be made in dir.
+func writableDir(dir string) error {
+	f, err := os.CreateTemp(dir, ".ncexport-check-*")
+	if err != nil {
+		return err
+	}
+	f.Close()
+	return os.Remove(f.Name())
+}
+
+// samePath reports whether a and b name the same file, as far as their
+// absolute paths tell; ignoring case on Windows and macOS, whose file
+// systems mostly do.
+func samePath(a, b string) bool {
+	aa, err1 := filepath.Abs(a)
+	bb, err2 := filepath.Abs(b)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		return strings.EqualFold(aa, bb)
+	}
+	return aa == bb
 }
 
 // missingFile is the file -missing writes. As the mbox, it is written
@@ -322,7 +357,7 @@ func createMissing(path string) (*missingFile, error) {
 	if err != nil {
 		return nil, err
 	}
-	mboxout.AddTemp(f.Name())
+	mboxout.AddTempFile(f)
 	m := &missingFile{path, f, bufio.NewWriter(f)}
 	m.w.WriteString("group\tnumber\tdate\tsubject\tfrom\tmessage-id\n")
 	return m, nil

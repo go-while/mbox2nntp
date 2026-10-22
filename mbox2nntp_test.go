@@ -1433,3 +1433,39 @@ func TestPathSuffix(t *testing.T) {
 		}
 	}
 }
+
+// An mbox whose messages were all dropped, none offered, is not marked
+// done: more likely a separator shape the parser does not know, or a
+// parser fault, than an input of broken messages only. One with only
+// yEnc articles, dropped on purpose, is done.
+func TestIterateMboxAllDropped(t *testing.T) {
+	savedDry, savedMax := DRYRUN, MaxWorkers
+	t.Cleanup(func() { DRYRUN, MaxWorkers = savedDry, savedMax })
+	DRYRUN, MaxWorkers = true, 1
+	const sep = "From nobody Thu Dec  8 12:55:04 2016\n"
+	const head = "Subject: s\nFrom: a@b.c\nDate: Thu, 8 Dec 2016 12:55:04 +0000\nNewsgroups: x.test\n"
+	for _, c := range []struct {
+		name string
+		in   string
+		done bool
+	}{
+		{"no Message-IDs", sep + head + "\none\n" + sep + head + "\ntwo\n", false},
+		{"only yEnc", sep + head + "Message-ID: <y@test>\n\n=ybegin line=128 size=3 name=x\nabc\n=yend size=3\n", true},
+	} {
+		mr, err := mbox.CreateMboxStream(strings.NewReader(c.in))
+		if err != nil {
+			t.Fatal(err)
+		}
+		shortTimeouts(t)
+		globalBools.V = make(map[string]bool)
+		globalCounter = GlobalCounter{v: make(map[string]int)}
+		worker_channel = make(chan *ArticleItem, 10)
+		returned := make(chan bool)
+		go func() { worker(1); close(returned) }()
+		iterateMbox(mr, &eofReader{r: strings.NewReader(""), sawEOF: true}, c.name)
+		<-returned
+		if done := globalBools.GetGB("done"); done != c.done {
+			t.Errorf("%s: done = %t, want %t", c.name, done, c.done)
+		}
+	}
+}

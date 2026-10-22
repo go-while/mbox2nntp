@@ -94,6 +94,9 @@ func ParseDB(b []byte) (*DB, error) {
 // returns the error after the records before it went to fn. An error from
 // fn stops the reading and is returned as it is.
 func ReadDB(r io.ReaderAt, size int64, fn func(Record) error) (*DB, error) {
+	if size < 0 {
+		return nil, fmt.Errorf("negative size %d", size)
+	}
 	var hdr [8 + 5*8]byte
 	n, _ := r.ReadAt(hdr[:], 0)
 	b := hdr[:n]
@@ -160,6 +163,10 @@ func ReadDB(r io.ReaderAt, size int64, fn func(Record) error) (*DB, error) {
 	// most records are an overview line or a small article: one read gets
 	// the size word and the record together
 	buf := make([]byte, 1024)
+	// Records do not overlap, so they add up to less than the file. Every
+	// entry of a crafted table can name the same big record: a small
+	// gzipped .db would stand for any amount of articles.
+	var total uint64
 	for i := range count {
 		if _, err := io.ReadFull(table, wbuf[:w]); err != nil {
 			return db, fmt.Errorf("offset table: %w", err)
@@ -168,21 +175,26 @@ func ReadDB(r io.ReaderAt, size int64, fn func(Record) error) (*DB, error) {
 		if off == 0 {
 			continue
 		}
-		bad := fmt.Errorf("record of article %d at %#x is outside the file", first+i, off)
+		bad := func() error {
+			return fmt.Errorf("record of article %d at %#x is outside the file", first+i, off)
+		}
 		if off > fsize || fsize-off < uint64(w) {
-			return db, bad
+			return db, bad()
 		}
 		k, err := r.ReadAt(buf, int64(off))
 		if err != nil && err != io.EOF {
 			return db, err
 		}
 		if k < w {
-			return db, bad
+			return db, bad()
 		}
 		rsize := get(buf[:w])
 		start := off + uint64(w)
 		if rsize == 0 || rsize > fsize || start+rsize > fsize {
-			return db, bad
+			return db, bad()
+		}
+		if total += rsize; total > fsize {
+			return db, fmt.Errorf("records up to article %d add up to more than the file: they overlap", first+i)
 		}
 		rec := Record{Num: first + i, Size: int64(rsize) - 1}
 		p := buf[w:k]
@@ -355,7 +367,7 @@ func (s *scan) keepListed(group string, rec Record) error {
 		if err != nil {
 			return err
 		}
-		mboxout.AddTemp(f.Name()) // see tarDB
+		mboxout.AddTempFile(f) // see tarDB
 		s.listed, s.lw = f, bufio.NewWriterSize(f, 1<<16)
 	}
 	fields := bytes.SplitN(rec.Data, []byte("\t"), 6)
@@ -466,7 +478,7 @@ func (s *scan) db(group, name string, r io.ReaderAt, size int64, emit func(Item)
 	var emitErr error // from emit or keepListed: stops the reading
 	_, err := ReadDB(r, size, func(rec Record) error {
 		switch {
-		case rec.Data == nil && rec.Size > MaxArticleSize:
+		case rec.Type == Article && rec.Data == nil:
 			s.st.TooBig++
 			s.problem("%s: article %d: %d bytes, over the limit of %d, skipped", name, rec.Num, rec.Size, MaxArticleSize)
 		case rec.Type == Article:
@@ -474,6 +486,8 @@ func (s *scan) db(group, name string, r io.ReaderAt, size int64, emit func(Item)
 			emitErr = emit(Item{Group: group, Num: rec.Num, Text: rec.Data, InDB: true})
 			return emitErr
 		case rec.Type == Overview || rec.Type == BigArticle:
+			// listed, also when a broken overview line is over the
+			// limit: Data is nil then
 			g.listed = append(g.listed, rec.Num)
 			if Missing != nil {
 				emitErr = s.keepListed(group, rec)
@@ -510,7 +524,7 @@ func (s *scan) tarDB(group, name string, tr io.Reader, size int64) error {
 	}
 	// also removed when a signal ends a program that asked for that with
 	// mboxout.RemoveTempsOnSignal, as ncexport does
-	mboxout.AddTemp(f.Name())
+	mboxout.AddTempFile(f)
 	defer mboxout.RemoveTemp(f.Name())
 	defer f.Close()
 	n, err := io.Copy(f, tr)
@@ -518,6 +532,13 @@ func (s *scan) tarDB(group, name string, tr io.Reader, size int64) error {
 		return fmt.Errorf("%s: %w", name, err)
 	}
 	return s.db(group, name, f, n, s.fn)
+}
+
+// skippedArt notes an .artN file skipped for its size: it is in the
+// spool, so its number is not missing.
+func (s *scan) skippedArt(group string, num uint64) {
+	g := s.group(group)
+	g.files = append(g.files, num)
 }
 
 func (s *scan) file(group string, num uint64, text []byte) error {
@@ -591,6 +612,9 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 			continue
 		}
 		if s.tooBig(h.Name, h.Size, isArt) {
+			if isArt {
+				s.skippedArt(group, num)
+			}
 			continue
 		}
 		if !isArt {
@@ -616,15 +640,27 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 func ReadDir(root string, fn func(Item) error) (Stats, error) {
 	s := newScan(fn)
 	defer s.close()
-	parent := filepath.Dir(filepath.Clean(root))
-	err := filepath.WalkDir(root, func(dir string, d os.DirEntry, err error) error {
+	root = filepath.Clean(root)
+	parent := filepath.Dir(root)
+	// WalkDir does not follow a symlink, not even the root: a root that
+	// is one would give no group. Walk its target, and name the groups
+	// from root as given.
+	walkRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return s.st, err
+	}
+	err = filepath.WalkDir(walkRoot, func(dir string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if !d.IsDir() {
 			return nil
 		}
-		rel, err := filepath.Rel(parent, dir)
+		under, err := filepath.Rel(walkRoot, dir)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(parent, filepath.Join(root, under))
 		if err != nil {
 			return err
 		}
@@ -641,7 +677,6 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 		}
 		var arts []art
 		var dbName string
-		var dbSize int64
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
@@ -651,18 +686,22 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 				s.st.Other++
 				continue
 			}
-			fi, err := e.Info()
+			// os.Stat, not e.Info: the size of a symlink's target
+			name := filepath.Join(dir, e.Name())
+			fi, err := os.Stat(name)
 			if err != nil {
 				return err
 			}
-			name := filepath.Join(dir, e.Name())
 			if s.tooBig(name, fi.Size(), isArt) {
+				if isArt {
+					s.skippedArt(group, num)
+				}
 				continue
 			}
 			if isArt {
 				arts = append(arts, art{num, e.Name()})
 			} else {
-				dbName, dbSize = name, fi.Size()
+				dbName = name
 			}
 		}
 		slices.SortStableFunc(arts, func(a, b art) int { return cmp.Compare(a.num, b.num) })
@@ -685,7 +724,14 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 			if err != nil {
 				return err
 			}
-			err = s.db(group, dbName, f, dbSize, func(it Item) error {
+			// the size of what was opened: the file may have changed,
+			// and a symlink's own size is its target's name
+			fi, err := f.Stat()
+			if err != nil {
+				f.Close()
+				return err
+			}
+			err = s.db(group, dbName, f, fi.Size(), func(it Item) error {
 				if err := artsUpTo(it.Num); err != nil {
 					return err
 				}

@@ -301,8 +301,7 @@ func TestTooBig(t *testing.T) {
 // tableAtEnd moves the offset table of a .db made by newscachetest.DB to
 // the end of the file and clears the old one, as NewsCache leaves it once
 // a growing article range made it allocate a new table.
-func tableAtEnd(b []byte, w int) []byte {
-	bo := binary.LittleEndian
+func tableAtEnd(b []byte, bo binary.ByteOrder, w int) []byte {
 	get := func(off int) int {
 		if w == 8 {
 			return int(bo.Uint64(b[off:]))
@@ -350,11 +349,15 @@ func TestReadDB(t *testing.T) {
 	}
 	recs[7] = newscachetest.Record{Type: newscachetest.Article, Data: small}
 	recs[8] = newscachetest.Record{Type: newscachetest.Article, Data: long}
-	for _, w := range []int{4, 8} {
+	for _, c := range []struct {
+		bo binary.ByteOrder
+		w  int
+	}{{binary.LittleEndian, 4}, {binary.LittleEndian, 8}, {binary.BigEndian, 4}, {binary.BigEndian, 8}} {
+		bo, w := c.bo, c.w
 		for _, moved := range []bool{false, true} {
-			b := newscachetest.DB(binary.LittleEndian, w, 1, 20000, recs)
+			b := newscachetest.DB(bo, w, 1, 20000, recs)
 			if moved {
-				b = tableAtEnd(b, w)
+				b = tableAtEnd(b, bo, w)
 			}
 			sr := &sizedReader{r: bytes.NewReader(b)}
 			var got []Record
@@ -362,7 +365,7 @@ func TestReadDB(t *testing.T) {
 				got = append(got, r)
 				return nil
 			})
-			what := fmt.Sprintf("w=%d moved=%t", w, moved)
+			what := fmt.Sprintf("%v w=%d moved=%t", bo, w, moved)
 			if err != nil || db.First != 1 || db.Last != 20000 || len(got) != 20000 {
 				t.Fatalf("%s: %v, %+v, %d records", what, err, db, len(got))
 			}
@@ -412,7 +415,7 @@ func TestReadTarDBTempFile(t *testing.T) {
 	t.Setenv("TMPDIR", tmp)
 	t.Setenv("TMP", tmp) // Windows
 	files := spool()
-	files["x/y/.db"] = tableAtEnd(files["x/y/.db"], 8)
+	files["x/y/.db"] = tableAtEnd(files["x/y/.db"], binary.LittleEndian, 8)
 	data := writeTar(t, files, []string{"x/y/.art2", "x/y/z/.art1", "x/.active", "x/y/.db"}, true)
 	want := []got{{"x.y", 2, false, "big"}, {"x.y.z", 1, false, "small"}, {"x.y", 3, true, "small"}}
 	for _, limit := range []int64{saved, 0} {
@@ -467,5 +470,159 @@ func TestMissing(t *testing.T) {
 	}
 	if left, _ := os.ReadDir(TempDir); len(left) != 0 {
 		t.Errorf("temporary files left: %v", left)
+	}
+}
+
+// writeSpool writes files (path: content) under dir.
+func writeSpool(t *testing.T, dir string, files map[string][]byte) {
+	t.Helper()
+	for name, data := range files {
+		p := filepath.Join(dir, filepath.FromSlash(name))
+		os.MkdirAll(filepath.Dir(p), 0755)
+		if err := os.WriteFile(p, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A .db that is a symlink is read whole: its size is the target's, not
+// the link's, which is the length of the target's name.
+func TestReadDirSymlinkDB(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "store.db")
+	if err := os.WriteFile(store, newscachetest.DB(binary.LittleEndian, 8, 2, 6, dbRecs), 0644); err != nil {
+		t.Fatal(err)
+	}
+	g := filepath.Join(dir, "spool", "g")
+	os.MkdirAll(g, 0755)
+	if err := os.Symlink(store, filepath.Join(g, ".db")); err != nil {
+		t.Skip(err) // Windows without the privilege
+	}
+	var items []got
+	st, err := ReadDir(g, collect(&items))
+	if err != nil || st.InDB != 1 || st.BadDBs != 0 || st.Listed != 2 {
+		t.Errorf("%+v, %v", st, err)
+	}
+}
+
+// A spool directory given as a symlink is walked: filepath.WalkDir does
+// not follow a symlinked root. The groups are named from the link.
+func TestReadDirSymlinkRoot(t *testing.T) {
+	dir := t.TempDir()
+	writeSpool(t, filepath.Join(dir, "store"), spool())
+	link := filepath.Join(dir, "x")
+	if err := os.Symlink(filepath.Join(dir, "store", "x"), link); err != nil {
+		t.Skip(err)
+	}
+	var items []got
+	st, err := ReadDir(link, collect(&items))
+	want := []got{{"x.y", 2, false, "big"}, {"x.y", 3, true, "small"}, {"x.y.z", 1, false, "small"}}
+	if err != nil || !reflect.DeepEqual(items, want) || !reflect.DeepEqual(st, wantStats()) {
+		t.Errorf("%+v %+v %v", items, st, err)
+	}
+}
+
+// An .artN file skipped for its size is in the spool: not missing, and
+// not passed to Missing.
+func TestTooBigArtNotMissing(t *testing.T) {
+	savedArt := MaxArticleSize
+	t.Cleanup(func() { MaxArticleSize = savedArt; Missing = nil; TempDir = "" })
+	TempDir = t.TempDir()
+	var listed []uint64
+	Missing = func(l Listed) error { listed = append(listed, l.Num); return nil }
+	files := spool()
+	MaxArticleSize = int64(len(files["x/y/.art2"]) - 1) // .art2 over the limit
+	st, err := ReadTar(bytes.NewReader(writeTar(t, files, []string{"x/y/.db", "x/y/.art2", "x/y/z/.art1"}, false)), func(Item) error { return nil })
+	if err != nil || st.TooBig != 1 || st.Missing != 1 || !reflect.DeepEqual(listed, []uint64{5}) {
+		t.Errorf("tar: %+v, listed %v, %v", st, listed, err)
+	}
+	dir := t.TempDir()
+	writeSpool(t, dir, files)
+	listed = nil
+	st, err = ReadDir(filepath.Join(dir, "x"), func(Item) error { return nil })
+	if err != nil || st.TooBig != 1 || st.Missing != 1 || !reflect.DeepEqual(listed, []uint64{5}) {
+		t.Errorf("dir: %+v, listed %v, %v", st, listed, err)
+	}
+}
+
+// An overview record over MaxArticleSize, a broken one, is still listed,
+// not counted as a too-big article.
+func TestBigOverviewListed(t *testing.T) {
+	saved := MaxArticleSize
+	t.Cleanup(func() { MaxArticleSize = saved })
+	MaxArticleSize = 10
+	b := newscachetest.DB(binary.LittleEndian, 8, 1, 1, map[uint64]newscachetest.Record{
+		1: {Type: newscachetest.Overview, Data: "1\tsubject\ta@b\tdate\t<x@y>\t\t100\t3\t"},
+	})
+	s := newScan(func(Item) error { return nil })
+	if err := s.db("g", "g/.db", bytes.NewReader(b), int64(len(b)), s.fn); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := s.finish(); st.Listed != 1 || st.TooBig != 0 {
+		t.Errorf("%+v", st)
+	}
+}
+
+// A crafted table pointing every number at the same record would turn a
+// small file into any amount of articles: records that add up to more
+// than the file are an error.
+func TestReadDBOverlap(t *testing.T) {
+	art := "Message-ID: <a@b>\r\n\r\n" + strings.Repeat("x", 64<<10)
+	const n = 64
+	b := newscachetest.DB(binary.LittleEndian, 8, 1, 1, map[uint64]newscachetest.Record{1: {Type: Article, Data: art}})
+	userdata := int(binary.LittleEndian.Uint64(b[8+4*8:]))
+	rec := binary.LittleEndian.Uint64(b[userdata+2*8:])
+	tab := len(b) + 8
+	b = append(b, make([]byte, 8+(2+n)*8)...)
+	binary.LittleEndian.PutUint64(b[tab:], 1)
+	binary.LittleEndian.PutUint64(b[tab+8:], n)
+	for i := range n {
+		binary.LittleEndian.PutUint64(b[tab+16+8*i:], rec)
+	}
+	binary.LittleEndian.PutUint64(b[8+4*8:], uint64(tab))
+	count := 0
+	_, err := ReadDB(bytes.NewReader(b), int64(len(b)), func(Record) error { count++; return nil })
+	if err == nil || !strings.Contains(err.Error(), "overlap") || count > 1 {
+		t.Errorf("%d records, %v", count, err)
+	}
+}
+
+func TestReadDBNegativeSize(t *testing.T) {
+	b := newscachetest.DB(binary.LittleEndian, 8, 2, 6, dbRecs)
+	if _, err := ReadDB(bytes.NewReader(b), -1, func(Record) error { return nil }); err == nil {
+		t.Error("size -1: no error")
+	}
+}
+
+// ReadDir merges inline articles and .artN files in number order, also
+// when they alternate.
+func TestReadDirMergeOrder(t *testing.T) {
+	art := func(subj string) string {
+		return "Message-ID: <" + subj + "@x>\r\nSubject: " + subj + "\r\n\r\nbody\r\n"
+	}
+	files := map[string][]byte{
+		"g/.db": newscachetest.DB(binary.LittleEndian, 8, 1, 7, map[uint64]newscachetest.Record{
+			1: {Type: newscachetest.Article, Data: art("i1")},
+			3: {Type: newscachetest.Article, Data: art("i3")},
+			4: {Type: newscachetest.Overview, Data: "4\tf4"},
+			6: {Type: newscachetest.Article, Data: art("i6")},
+		}),
+		"g/.art2": []byte(art("f2")),
+		"g/.art4": []byte(art("f4")),
+		"g/.art5": []byte(art("f5")),
+		"g/.art7": []byte(art("f7")),
+	}
+	dir := t.TempDir()
+	writeSpool(t, dir, files)
+	var items []got
+	if _, err := ReadDir(filepath.Join(dir, "g"), collect(&items)); err != nil {
+		t.Fatal(err)
+	}
+	var subjs []string
+	for _, it := range items {
+		subjs = append(subjs, it.subj)
+	}
+	if want := []string{"i1", "f2", "i3", "f4", "f5", "i6", "f7"}; !reflect.DeepEqual(subjs, want) {
+		t.Errorf("%v, want %v", subjs, want)
 	}
 }

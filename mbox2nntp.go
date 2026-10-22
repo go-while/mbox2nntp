@@ -1471,6 +1471,11 @@ func finishFeeding(stoppedEarly bool) {
 	// workers that gave up connecting leave articles queued but unsent
 	if left := globalCounter.getCounter("msgnums"); left != 0 {
 		log.Printf("ERROR: %d articles were never sent, not marking done", left)
+	} else if dropped := globalCounter.getCounter("dropped"); ttot == 0 && dropped > 0 {
+		// every message dropped, none offered: more likely a separator
+		// shape the parser does not know, or a parser fault, than an
+		// input of nothing but broken messages
+		log.Printf("ERROR: all %d messages dropped, none offered, not marking done", dropped)
 	} else if terrcnt == 0 && !stoppedEarly {
 		globalBools.SetGB("done", true)
 	}
