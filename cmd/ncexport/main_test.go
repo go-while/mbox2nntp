@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unsafe"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
 	"github.com/go-while/mbox2nntp/newscache"
@@ -289,5 +290,21 @@ func TestTmpdir(t *testing.T) {
 	missing := filepath.Join(dir, "no-such-dir")
 	if _, err := export(in, nil, options{out: filepath.Join(dir, "g2.mbox"), tmpdir: missing}); err == nil || !strings.Contains(err.Error(), missing) {
 		t.Errorf("-tmpdir %s: %v", missing, err)
+	}
+}
+
+// The dedup map keeps a copy of the Message-ID, not a slice of the
+// article: that kept every article in memory (950 MB for rss.tar.gz).
+func TestFirstSeenCopies(t *testing.T) {
+	head, _, _ := newscache.Split([]byte(cross + strings.Repeat("body line\r\n", 1000)))
+	id := messageID(head)
+	seen := map[string]bool{}
+	if !firstSeen(seen, id) || firstSeen(seen, id) {
+		t.Fatal("firstSeen: wrong answers")
+	}
+	for k := range seen {
+		if k != "<cross@x>" || unsafe.StringData(k) == unsafe.StringData(id) {
+			t.Errorf("key %q shares the article's memory", k)
+		}
 	}
 }

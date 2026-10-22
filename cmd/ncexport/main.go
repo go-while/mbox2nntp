@@ -252,12 +252,9 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 		}
 		if id := messageID(head); id == "" {
 			st.noID++
-		} else if o.dedup {
-			if seen[id] {
-				st.dups++
-				return nil
-			}
-			seen[id] = true
+		} else if o.dedup && !firstSeen(seen, id) {
+			st.dups++
+			return nil
 		}
 		st.n++
 		return w.Write(head, body)
@@ -270,6 +267,17 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 }
 
 // messageID is the Message-ID header's value, unfolded, or "".
+// firstSeen reports whether id is not in seen yet, and adds it. It stores
+// a copy: id is a slice of the whole article's text, which as a map key
+// stayed in memory to the end, every article of the export.
+func firstSeen(seen map[string]bool, id string) bool {
+	if seen[id] {
+		return false
+	}
+	seen[strings.Clone(id)] = true
+	return true
+}
+
 func messageID(head []string) string {
 	for i, l := range head {
 		if len(l) >= 11 && strings.EqualFold(l[:11], "message-id:") {
