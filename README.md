@@ -456,7 +456,7 @@ parser reports per file:
 - `near-misses`: body lines starting `From ` or `#! rnews ` that were *not* taken as a
   message separator. Up to five are logged with line numbers. In ordinary prose this is
   normal (`From Table 1 ...`). If the samples look like separators (`From user@host Thu
-  Dec  8 ...`), the collection uses a separator shape the parser does not know, and
+  Dec  8 12:55 2016`), the collection uses a separator shape the parser does not know, and
   articles were merged. Fix that in `go-lib-mbox2nntp` (`sepPatterns` in `mbox.go`)
   before importing it.
 
@@ -465,6 +465,9 @@ parser reports per file:
 Run one file with `-dry-run` (no server needed) and read the `Done read` line. Its near-miss count and
 samples show whether every message separator was recognised. The separator shapes known
 today are listed, with the collection that needs each, in `sepPatterns` in the library.
+Besides the archive shapes, the parser takes the line most mbox writers use (RFC 4155),
+`From user@example.com Thu Dec  8 12:55:04 2016`, when it is the whole line in exactly
+that form: mboxes from mutt, Thunderbird, Python's `mailbox` or usenet_archiver are read.
 
 ## Tests
 
