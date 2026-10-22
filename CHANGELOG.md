@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- go-lib-mbox2nntp `464249e`: the parser also takes the separator line most mbox writers use (RFC 4155), `From user@example.com Thu Dec  8 12:55:04 2016`, as a whole line in exactly that form. Mboxes from mutt, Thunderbird, Python's `mailbox` and usenet_archiver were not read at all before, or were merged into the message before. On the archive.org corpus (5.28 million messages) no message changes.
+- go-lib-mbox2nntp `73e35b8`: the parser also takes the separator line most mbox writers use (RFC 4155), `From user@example.com Thu Dec  8 12:55:04 2016`, as a whole line in exactly that form, with a year of 1 to 4 digits. Mboxes from mutt, Thunderbird, Python's `mailbox` and usenet_archiver were not read at all before, or were merged into the message before. On the archive.org corpus (5.28 million messages) no message changes.
 - uatexport and ncexport end each article's header with `X-Mbox2nntp-Format: mboxrd`. mbox2nntp then takes one `>` off the quoted `From ` and `#! rnews ` lines and drops the field, so an exported mbox goes to a server unchanged. Archive mboxes without the field are sent as stored, as before.
 - `#! rnews ` lines are quoted after any number of `>`, like `From ` lines. Before, `>#! rnews 5` was written as it was, and could not be told apart from a quoted `#! rnews 5`.
 
