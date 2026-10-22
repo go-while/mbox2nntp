@@ -211,8 +211,8 @@ Other programs can read UAT archives with the package `github.com/go-while/mbox2
 (standard library only, plus the zstd program); `uat/uattest` writes small archives for
 their tests.
 
-The mbox is mboxrd: body lines starting `From ` or `#! rnews ` after any number of `>` get
-one more `>` (mbox2nntp's parser takes both for the start of a message). Each article has a
+The mbox is mboxrd: header and body lines starting `From ` or `#! rnews ` after any number
+of `>` get one more `>` (mbox2nntp's parser takes both for the start of a message). Each article has a
 `From nobody DATE` line that mbox2nntp's parser reads, and ends its header with
 `X-Mbox2nntp-Format: mboxrd`. The articles get the same changes as above. mbox2nntp reads
 such an mbox back exactly: the field makes it take one `>` off those lines again, and it
@@ -402,8 +402,8 @@ Body lines are sent exactly as stored. Every line, header and body, is dot-stuff
 the wire (RFC 3977 3.1.1). `>From ` lines are not
 un-escaped: none of the archives measured so far is mbox-escaped, and in all of them a
 `>From ` line is part of the article as posted. The exception is an article whose header
-has `X-Mbox2nntp-Format: mboxrd`, as uatexport and ncexport write it: its quoted lines
-lose one `>`, and the field is dropped.
+has `X-Mbox2nntp-Format: mboxrd`, as uatexport and ncexport write it: its quoted lines,
+header and body, lose one `>`, and the field is dropped.
 
 Articles are skipped, not sent, when they have:
 

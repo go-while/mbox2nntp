@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Header lines are quoted like body lines: uatexport and ncexport put a `>` before a header line starting `From ` or `#! rnews ` (after any number of `>`), and mbox2nntp takes it off again when the article has `X-Mbox2nntp-Format: mboxrd`. Before, a header line shaped like a separator, such as `From nobody Thu Dec  8 12:55:04 2016`, ended the article there and lost its body. usenet_archiver already quoted header lines; its articles now arrive unchanged too.
+
 ## v0.3.2 (2026-10-22)
 
 - **ncexport writes one mbox per group** (`GROUP.mbox` or `GROUP.mbox.gz`), in a directory built under a temporary name and renamed when complete: `NAME/`, or `-o DIR`. The single mbox for a whole hierarchy is gone. A group the tarball holds in several places is appended to.

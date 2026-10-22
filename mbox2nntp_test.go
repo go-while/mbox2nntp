@@ -1496,7 +1496,7 @@ func collectMbox(t *testing.T, in string) []*ArticleItem {
 }
 
 // An mbox written by uatexport or ncexport carries mboxout.FormatField:
-// its quoted body lines are unquoted, and the field is not sent. An
+// its quoted header and body lines are unquoted, and the field is not sent. An
 // archive mbox without it is sent as stored, ">From " and all.
 func TestImportExportedMbox(t *testing.T) {
 	body := []string{"From the start", ">From a quote", ">>From deeper", "#! rnews 12", ">#! rnews 5", "> plain quote", "end"}
@@ -1506,7 +1506,10 @@ func TestImportExportedMbox(t *testing.T) {
 		t.Fatal(err)
 	}
 	head := []string{"Path: a!b", "From: a@b.c", "Newsgroups: x.test", "Subject: s", "Date: Thu, 8 Dec 2016 12:55:04 +0000", "Message-ID: <rd@test>"}
-	if err := w.Write(head, body); err != nil {
+	// header lines starting "From ": obsolete syntax, a separator shape
+	// (unquoted, it would end the article), and one already quoted
+	odd := []string{"From : obs@b.c", "From nobody Thu Dec  8 12:55:04 2016", ">From : quoted@b.c"}
+	if err := w.Write(append(append([]string{}, head...), odd...), body); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
@@ -1516,6 +1519,9 @@ func TestImportExportedMbox(t *testing.T) {
 	items := collectMbox(t, string(data))
 	if len(items) != 1 || !reflect.DeepEqual(items[0].body, body) {
 		t.Fatalf("exported: %d articles, body %q\nwant %q", len(items), items[0].body, body)
+	}
+	if want := append(append(append([]string{}, head...), odd...), mboxout.FormatField); !reflect.DeepEqual(items[0].head, want) {
+		t.Errorf("exported: head %q\nwant %q", items[0].head, want)
 	}
 	newhead, _, code := rewriteHead(items[0].msgid, items[0].head)
 	if code != 0 {

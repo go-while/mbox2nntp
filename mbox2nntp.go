@@ -1358,6 +1358,13 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 		// Print our message summary, consisting of message number and subject.
 		head := message.Headers()
+		// written by uatexport or ncexport: quoted mboxrd, header and body
+		quoted := mboxout.IsQuoted(head)
+		if quoted {
+			for i, l := range head {
+				head[i] = mboxout.Unquote(l)
+			}
+		}
 		/*for _, line := range head {
 			if strings.HasPrefix(line, "Message-ID: ") {
 
@@ -1377,8 +1384,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			log.Printf("[iterateMbox] file='%s' msgNumber=%d msgid='%s': %v, not sent, counted as 437", mboxfile, msgNumber, msgid, berr)
 			continue
 		}
-		if berr == nil && mboxout.IsQuoted(head) {
-			// written by uatexport or ncexport: quoted mboxrd
+		if berr == nil && quoted {
 			for i, l := range body {
 				body[i] = mboxout.Unquote(l)
 			}

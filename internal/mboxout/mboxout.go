@@ -199,8 +199,8 @@ func Create(path string, level int) (*Writer, error) {
 }
 
 // FormatField ends the header of every article Writer writes. It tells
-// mbox2nntp that the body is quoted (see NeedsQuote), so that it unquotes
-// it, and drops the field before sending. Old archive mboxes are not
+// mbox2nntp that the article is quoted (see NeedsQuote), header and body,
+// so that it unquotes it, and drops the field before sending. Old archive mboxes are not
 // quoted: in them a ">From " line is part of the article as posted.
 const FormatField = "X-Mbox2nntp-Format: mboxrd"
 
@@ -217,11 +217,16 @@ func IsQuoted(head []string) bool {
 }
 
 // Write adds one article: a "From nobody DATE" line, the header lines and
-// FormatField, a blank line, the body lines with NeedsQuote lines quoted,
-// and a blank line.
+// FormatField, a blank line, the body lines, and a blank line. Header and
+// body lines alike are quoted when NeedsQuote: a separator-shaped header
+// line, such as "From nobody Thu Dec  8 12:55:04 2016", would otherwise
+// end the article there.
 func (m *Writer) Write(head, body []string) error {
 	fmt.Fprintf(m.w, "From nobody %s\n", FromDate(head))
 	for _, l := range head {
+		if NeedsQuote(l) {
+			m.w.WriteByte('>')
+		}
 		m.w.WriteString(l)
 		m.w.WriteByte('\n')
 	}
@@ -275,7 +280,7 @@ func (m *Writer) Abort() {
 	RemoveTemp(m.f.Name())
 }
 
-// NeedsQuote reports a body line that gets one more ">": the lines mboxrd
+// NeedsQuote reports a line that gets one more ">": the lines mboxrd
 // quotes, "From " after any number of ">", and lines starting "#! rnews ".
 // go-lib-mbox2nntp, mbox2nntp's mbox parser, also takes "#! rnews N" for
 // the start of a message (rnews batches), so such a line in a body would
@@ -289,7 +294,7 @@ func NeedsQuote(l string) bool {
 	return strings.HasPrefix(t, "From ") || strings.HasPrefix(t, "#! rnews ")
 }
 
-// Unquote undoes the quote Write adds to a body line.
+// Unquote undoes the quote Write adds to a line.
 func Unquote(l string) string {
 	if strings.HasPrefix(l, ">") && NeedsQuote(l[1:]) {
 		return l[1:]
