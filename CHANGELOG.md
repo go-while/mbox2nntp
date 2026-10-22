@@ -2,7 +2,8 @@
 
 ## Unreleased
 
-- ncexport `-split`: one mbox per group, `GROUP.mbox` or `GROUP.mbox.gz`, in a directory built under a temporary name and renamed when complete. A group the tarball holds in several places is appended to.
+- **ncexport writes one mbox per group** (`GROUP.mbox` or `GROUP.mbox.gz`), in a directory built under a temporary name and renamed when complete: `NAME/`, or `-o DIR`. The single mbox for a whole hierarchy is gone. A group the tarball holds in several places is appended to.
+- **ncexport dedup is per group:** an article crossposted to several groups goes to each group's mbox, and only a repeat within one group is skipped. Memory for the dedup is bounded by the largest group. With `-missing`, every exported Message-ID is still kept, for the crosspost lookup.
 
 ## v0.3.1 (2026-10-22)
 

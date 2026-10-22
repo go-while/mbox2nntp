@@ -1,9 +1,9 @@
 // Command ncexport writes the articles of a NewsCache spool, such as the
 // tarballs of the textusenet-backup items on archive.org, out as one mbox
-// file, plain or gzipped.
+// per group, plain or gzipped, in a directory.
 //
 //	ncexport [flags] HIERARCHY.tar.gz
-//	curl -sL URL | ncexport -o HIERARCHY.mbox.gz -gzip -
+//	curl -sL URL | ncexport -o HIERARCHY -gzip -
 //	ncexport [flags] SPOOLDIR
 //
 // A tarball is read as a stream, in one pass, so it needs no space to be
@@ -31,11 +31,12 @@ import (
 const usage = `Usage: %[1]s [flags] INPUT
 
 INPUT is a tar archive of a NewsCache spool (.tar, .tar.gz or .tgz, or "-"
-for standard input) or a spool directory. The articles go to NAME.mbox, with
--gzip to NAME.mbox.gz, NAME being INPUT without its extension; -o names the
-output, and is needed for "-". An existing output is never replaced. The
-output is written under a temporary name next to it, ".NAME.*.tmp", and
-renamed when complete.
+for standard input) or a spool directory. The articles go to one mbox per
+group, GROUP.mbox (with -gzip GROUP.mbox.gz), in the directory NAME, NAME
+being INPUT without its extension; -o names the directory, and is needed for
+"-". An existing one is never replaced. The directory is written under a
+temporary name next to it, ".NAME.*.tmp", and renamed when complete. In a
+file name, characters other than letters, digits and "._+-" become "_".
 
 NewsCache keeps one directory per newsgroup with a .db file and .artN files;
 an article is in its .artN file or, in an unmodified NewsCache, inside the
@@ -48,9 +49,11 @@ A .db is read one record at a time, never whole; a .db over -max-db is
 skipped. From a tarball, a .db over 1 MiB is copied to a temporary file in
 -tmpdir while it is read, as its records are not in file order.
 
-An article crossposted to several groups is in each group's directory. It
-is written once, the first time its Message-ID is seen (-dedup=false writes
-every copy).
+An article crossposted to several groups is in each group's directory, and
+goes to each group's mbox. Within one group's mbox, an article is written
+once, the first time its Message-ID is seen (-dedup=false writes every
+copy). A group a tarball holds in several places is appended to, gzipped as
+one more gzip member.
 
 The mbox is mboxrd: each article starts with "From nobody DATE", DATE taken
 from its Date header, and body lines that start with "From " or ">From "
@@ -66,7 +69,6 @@ type options struct {
 	dedup   bool
 	tmpdir  string
 	missing string
-	split   bool
 }
 
 // sizeFlag is a size in bytes, given as a number with an optional K, M, G
@@ -129,10 +131,9 @@ func main() {
 	log.SetFlags(0)
 	o := options{}
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
-	fs.StringVar(&o.out, "o", "", "output `PATH` (default: NAME.mbox or NAME.mbox.gz)")
-	fs.Var(mboxout.GzipFlag{Level: &o.gzip}, "gzip", "gzip the mbox, to NAME.mbox.gz; -gzip=N sets the level, from 1 (fastest) to 9 (smallest), default 6")
-	fs.BoolVar(&o.dedup, "dedup", true, "write an article seen in several groups once, by Message-ID")
-	fs.BoolVar(&o.split, "split", false, "one mbox per group, GROUP.mbox (or .mbox.gz) in the directory NAME, or -o DIR")
+	fs.StringVar(&o.out, "o", "", "output `DIR` (default: NAME)")
+	fs.Var(mboxout.GzipFlag{Level: &o.gzip}, "gzip", "gzip the mboxes, to GROUP.mbox.gz; -gzip=N sets the level, from 1 (fastest) to 9 (smallest), default 6")
+	fs.BoolVar(&o.dedup, "dedup", true, "write an article once per group mbox, by Message-ID")
 	fs.Var(sizeFlag{&newscache.MaxDBSize}, "max-db", "skip a .db over `SIZE`, such as 16G; 0 for no limit. 4G is the most a 32-bit NewsCache can write; one from a 64-bit build can be bigger")
 	fs.StringVar(&o.missing, "missing", "", "write the articles a .db lists that are in neither the spool nor the export to `FILE`, tab-separated: group, number, date, subject, from, Message-ID. One crossposted to another group is found there, by Message-ID, and not written")
 	fs.StringVar(&o.tmpdir, "tmpdir", "", "`DIR` for temporary files: the copy of a .db over 1 MiB from a tarball, and the listed articles for -missing (default: the output's directory)")
@@ -171,7 +172,7 @@ type stats struct {
 	out                    string
 	n, dups, noID, oddDots int
 	missingFile            string // -missing
-	groupFiles             int    // -split: mbox files written
+	groupFiles             int    // group mboxes written
 	listedFound, lost      int    // of Missing: exported from another group, or not
 }
 
@@ -183,17 +184,13 @@ func (st stats) missingWhat() string {
 }
 
 func (st stats) summary(input string) string {
-	out := st.out
-	if st.groupFiles > 0 {
-		out = fmt.Sprintf("%s/ (%d group files)", st.out, st.groupFiles)
-	}
-	s := fmt.Sprintf("%s: %d articles to %s, from %d groups: %d .art files, %d inside .db files",
-		input, st.n, out, st.Groups, st.Files, st.InDB)
+	s := fmt.Sprintf("%s: %d articles to %s/ (%d group files), from %d groups: %d .art files, %d inside .db files",
+		input, st.n, st.out, st.groupFiles, st.Groups, st.Files, st.InDB)
 	for _, c := range []struct {
 		n    int
 		what string
 	}{
-		{st.dups, "crossposted copies skipped"},
+		{st.dups, "duplicates within a group skipped"},
 		{st.noID, "without Message-ID"},
 		{st.oddDots, `with a line starting with a single "." (kept)`},
 		{st.Missing, st.missingWhat()},
@@ -209,18 +206,8 @@ func (st stats) summary(input string) string {
 	return s
 }
 
-// outName is INPUT without its directory and extension, plus .mbox or
-// .mbox.gz.
-func outName(input string, gz bool) string {
-	name := baseName(input) + ".mbox"
-	if gz {
-		name += ".gz"
-	}
-	return name
-}
-
-// baseName is INPUT without its directory and extension: the name of the
-// -split directory.
+// baseName is INPUT without its directory and extension: the default
+// output directory.
 func baseName(input string) string {
 	name := filepath.Base(filepath.Clean(input))
 	for _, ext := range []string{".tar.gz", ".tgz", ".tar"} {
@@ -231,7 +218,7 @@ func baseName(input string) string {
 	return name
 }
 
-// groupFile is the file name of a group's mbox with -split, without its
+// groupFile is the file name of a group's mbox, without its
 // extension: the group name with every character but letters, digits and
 // ".", "_", "+", "-" turned into "_". "_" goes in front of a name that would
 // be hidden, or that Windows reserves (CON, NUL, COM1, ... before the
@@ -258,23 +245,10 @@ var windowsReserved = map[string]bool{"CON": true, "PRN": true, "AUX": true, "NU
 	"COM1": true, "COM2": true, "COM3": true, "COM4": true, "COM5": true, "COM6": true, "COM7": true, "COM8": true, "COM9": true,
 	"LPT1": true, "LPT2": true, "LPT3": true, "LPT4": true, "LPT5": true, "LPT6": true, "LPT7": true, "LPT8": true, "LPT9": true}
 
-// sink is where export writes the articles: one mbox, or one per group.
-type sink interface {
-	write(group string, head, body []string) error
-	close() error // commits the output
-	abort()       // removes it
-}
-
-type oneMbox struct{ w *mboxout.Writer }
-
-func (m oneMbox) write(_ string, head, body []string) error { return m.w.Write(head, body) }
-func (m oneMbox) close() error                              { return m.w.Close() }
-func (m oneMbox) abort()                                    { m.w.Abort() }
-
-// splitMbox writes one mbox per group into a temporary directory, renamed
+// groupMboxes writes one mbox per group into a temporary directory, renamed
 // to dir when complete. One group file is open at a time: a tarball holds
 // most groups in one run, and a group met again later is appended to.
-type splitMbox struct {
+type groupMboxes struct {
 	dir, tmp, ext string
 	level         int
 	cur           *mboxout.Writer
@@ -282,7 +256,7 @@ type splitMbox struct {
 	files         map[string]bool // group files written
 }
 
-func createSplit(dir string, level int) (*splitMbox, error) {
+func createGroupDir(dir string, level int) (*groupMboxes, error) {
 	dir = filepath.Clean(dir)
 	if err := mboxout.MustNotExist(dir); err != nil {
 		return nil, err
@@ -296,10 +270,10 @@ func createSplit(dir string, level int) (*splitMbox, error) {
 	if level != 0 {
 		ext += ".gz"
 	}
-	return &splitMbox{dir: dir, tmp: tmp, ext: ext, level: level, files: map[string]bool{}}, nil
+	return &groupMboxes{dir: dir, tmp: tmp, ext: ext, level: level, files: map[string]bool{}}, nil
 }
 
-func (m *splitMbox) write(group string, head, body []string) error {
+func (m *groupMboxes) write(group string, head, body []string) error {
 	if m.cur == nil || group != m.group {
 		if m.cur != nil {
 			if err := m.cur.Close(); err != nil {
@@ -319,7 +293,7 @@ func (m *splitMbox) write(group string, head, body []string) error {
 	return m.cur.Write(head, body)
 }
 
-func (m *splitMbox) close() error {
+func (m *groupMboxes) close() error {
 	if m.cur != nil {
 		if err := m.cur.Close(); err != nil {
 			m.abort()
@@ -334,7 +308,7 @@ func (m *splitMbox) close() error {
 	return mboxout.Commit(m.tmp, m.dir)
 }
 
-func (m *splitMbox) abort() {
+func (m *groupMboxes) abort() {
 	if m.cur != nil {
 		m.cur.Abort()
 	}
@@ -344,10 +318,8 @@ func (m *splitMbox) abort() {
 // export reads input, or stdin for "-", and writes the mbox.
 func export(input string, stdin io.Reader, o options) (st stats, err error) {
 	st.out = o.out
-	if st.out == "" && o.split {
+	if st.out == "" {
 		st.out = baseName(input)
-	} else if st.out == "" {
-		st.out = outName(input, o.gzip != 0)
 	}
 	read := func(fn func(newscache.Item) error) (newscache.Stats, error) {
 		return newscache.ReadTar(stdin, fn)
@@ -380,7 +352,12 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 		// now, not at the first big .db, minutes into the run
 		return st, fmt.Errorf("-tmpdir: %w", err)
 	}
+	// seen is the dedup of one group's mbox, dropped when the next group
+	// starts. all holds every Message-ID written, for -missing only, which
+	// looks up crossposts stored under another group.
 	seen := map[string]bool{}
+	seenGroup, seenStarted := "", false
+	var all map[string]bool
 	var mf *missingFile
 	if o.missing != "" {
 		if samePath(o.missing, st.out) {
@@ -390,9 +367,10 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 			return st, err
 		}
 		st.missingFile = o.missing
-		// called after the last article: seen holds every Message-ID written
+		all = map[string]bool{}
+		// called after the last article: all holds every Message-ID written
 		newscache.Missing = func(l newscache.Listed) error {
-			if len(l.Overview) > 4 && seen[strings.TrimSpace(l.Overview[4])] {
+			if len(l.Overview) > 4 && all[strings.TrimSpace(l.Overview[4])] {
 				st.listedFound++
 				return nil
 			}
@@ -401,37 +379,31 @@ func export(input string, stdin io.Reader, o options) (st stats, err error) {
 		}
 		defer func() { newscache.Missing = nil }()
 	}
-	var w sink
-	if o.split {
-		var sm *splitMbox
-		if sm, err = createSplit(st.out, o.gzip); err == nil {
-			w = sm
-			defer func() { st.groupFiles = len(sm.files) }()
-		}
-	} else {
-		var mw *mboxout.Writer
-		if mw, err = mboxout.Create(st.out, o.gzip); err == nil {
-			w = oneMbox{mw}
-		}
-	}
+	w, err := createGroupDir(st.out, o.gzip)
 	if err != nil {
 		mf.abort()
 		return st, err
 	}
+	defer func() { st.groupFiles = len(w.files) }()
 	st.Stats, err = read(func(it newscache.Item) error {
 		head, body, odd := newscache.Split(it.Text)
 		if odd {
 			st.oddDots++
 		}
-		switch id := messageID(head); {
-		case id == "":
+		id := messageID(head)
+		if id == "" {
 			st.noID++
-		case o.dedup || mf != nil:
-			// -missing looks crossposts up in seen too
-			if !firstSeen(seen, id) && o.dedup {
+		} else if o.dedup {
+			if !seenStarted || it.Group != seenGroup {
+				seen, seenGroup, seenStarted = map[string]bool{}, it.Group, true
+			}
+			if !firstSeen(seen, id) {
 				st.dups++
 				return nil
 			}
+		}
+		if all != nil && id != "" {
+			firstSeen(all, id)
 		}
 		st.n++
 		return w.write(it.Group, head, body)

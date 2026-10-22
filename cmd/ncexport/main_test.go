@@ -112,6 +112,21 @@ func head(text string) []string {
 	return h
 }
 
+// subjects returns the Subject of every article in an mbox, in order.
+func subjects(t *testing.T, path string) []string {
+	t.Helper()
+	heads, _ := readBack(t, path)
+	var out []string
+	for _, h := range heads {
+		for _, l := range h {
+			if v, ok := strings.CutPrefix(l, "Subject: "); ok {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
 func TestExportTar(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "h.tar.gz")
@@ -121,52 +136,89 @@ func TestExportTar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.out != "h.mbox" || st.n != 3 || st.dups != 1 || st.noID != 1 || st.oddDots != 1 ||
+	// the crossposted article goes to both groups
+	if st.out != "h" || st.n != 4 || st.dups != 0 || st.noID != 1 || st.oddDots != 1 || st.groupFiles != 2 ||
 		st.Groups != 2 || st.Files != 3 || st.InDB != 1 || st.Missing != 1 {
 		t.Errorf("stats %+v", st)
 	}
-	heads, bodies := readBack(t, "h.mbox")
 	f := mboxout.FormatField
-	if want := [][]string{append(head(cross), f), append(head(inline), f), append(head(noID), f)}; !reflect.DeepEqual(heads, want) {
-		t.Errorf("headers %q\nwant %q", heads, want)
-	}
-	// the doubled dot undone, the single one kept, "From " quoted
-	data, _ := os.ReadFile("h.mbox")
-	for _, want := range []string{
-		"From nobody Sat Jan  3 02:40:01 2004\n",
-		"\n>From the start\n.dot\n",
-		"\n.single dot\n",
+	for name, want := range map[string][][]string{
+		"h/h.one.mbox": {append(head(cross), f), append(head(inline), f)},
+		"h/h.two.mbox": {append(head(cross), f), append(head(noID), f)},
 	} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("mbox lacks %q", want)
+		if heads, _ := readBack(t, name); !reflect.DeepEqual(heads, want) {
+			t.Errorf("%s: headers %q\nwant %q", name, heads, want)
 		}
 	}
-	if strings.Contains(string(data), "\r") {
+	// the doubled dot undone, the single one kept, "From " quoted
+	one, _ := os.ReadFile("h/h.one.mbox")
+	two, _ := os.ReadFile("h/h.two.mbox")
+	for _, c := range []struct {
+		data []byte
+		want string
+	}{
+		{one, "From nobody Sat Jan  3 02:40:01 2004\n"},
+		{one, "\n>From the start\n.dot\n"},
+		{two, "\n.single dot\n"},
+	} {
+		if !strings.Contains(string(c.data), c.want) {
+			t.Errorf("mbox lacks %q", c.want)
+		}
+	}
+	if strings.Contains(string(one)+string(two), "\r") {
 		t.Error("CR left in the mbox")
 	}
-	if len(bodies) != 3 {
-		t.Errorf("%d bodies", len(bodies))
-	}
 	if _, err := export(in, nil, options{dedup: true}); err == nil {
-		t.Error("an existing mbox was replaced")
+		t.Error("an existing directory was replaced")
 	}
 
-	// every copy, gzipped
-	st, err = export(in, nil, options{gzip: 6})
-	if err != nil || st.out != "h.mbox.gz" || st.n != 4 || st.dups != 0 {
-		t.Errorf("-dedup=false -gzip: %+v, %v", st, err)
+	// gzipped
+	st, err = export(in, nil, options{out: "gz", dedup: true, gzip: 6})
+	if err != nil || st.n != 4 {
+		t.Errorf("-gzip: %+v, %v", st, err)
 	}
-	if heads, _ := readBack(t, "h.mbox.gz"); len(heads) != 4 {
-		t.Errorf("-dedup=false: read back %d articles", len(heads))
+	if got := subjects(t, "gz/h.one.mbox.gz"); !slices.Equal(got, []string{"cross", "inline"}) {
+		t.Errorf("-gzip: h.one %q", got)
 	}
 }
 
-// "-" reads a plain tar from stdin; a directory gives the same articles in
-// group and number order.
+// Dedup works within one group's mbox: the same Message-ID twice in a group
+// is written once, and every copy with -dedup=false.
+func TestDedupWithinGroup(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range []string{"g/.art1", "g/.art2", "k/.art1"} {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(cross))})
+		tw.Write([]byte(cross))
+	}
+	tw.Close()
+	for _, c := range []struct {
+		dedup   bool
+		n, dups int
+		g       []string
+	}{{true, 2, 1, []string{"cross"}}, {false, 3, 0, []string{"cross", "cross"}}} {
+		out := fmt.Sprintf("out-%t", c.dedup)
+		st, err := export("-", bytes.NewReader(buf.Bytes()), options{out: out, dedup: c.dedup})
+		if err != nil || st.n != c.n || st.dups != c.dups {
+			t.Errorf("dedup=%t: %+v, %v", c.dedup, st, err)
+		}
+		if got := subjects(t, out+"/g.mbox"); !slices.Equal(got, c.g) {
+			t.Errorf("dedup=%t: g %q, want %q", c.dedup, got, c.g)
+		}
+		if got := subjects(t, out+"/k.mbox"); !slices.Equal(got, []string{"cross"}) {
+			t.Errorf("dedup=%t: k %q", c.dedup, got)
+		}
+	}
+}
+
+// "-" reads a plain tar from stdin; a directory gives the same mboxes, its
+// groups in number order.
 func TestExportStdinAndDir(t *testing.T) {
 	dir := t.TempDir()
-	st, err := export("-", bytes.NewReader(tarball(t, false)), options{out: filepath.Join(dir, "stdin.mbox"), dedup: true})
-	if err != nil || st.n != 3 {
+	st, err := export("-", bytes.NewReader(tarball(t, false)), options{out: filepath.Join(dir, "stdin"), dedup: true})
+	if err != nil || st.n != 4 {
 		t.Fatalf("stdin: %+v, %v", st, err)
 	}
 	root := filepath.Join(dir, "spool", "h")
@@ -175,23 +227,25 @@ func TestExportStdinAndDir(t *testing.T) {
 		os.MkdirAll(filepath.Dir(p), 0755)
 		os.WriteFile(p, data, 0644)
 	}
-	st, err = export(root, nil, options{out: filepath.Join(dir, "dir.mbox"), dedup: true})
-	if err != nil || st.n != 3 || st.Missing != 1 {
+	st, err = export(root, nil, options{out: filepath.Join(dir, "dir"), dedup: true})
+	if err != nil || st.n != 4 || st.Missing != 1 {
 		t.Fatalf("dir: %+v, %v", st, err)
 	}
-	a, _ := os.ReadFile(filepath.Join(dir, "stdin.mbox"))
-	b, _ := os.ReadFile(filepath.Join(dir, "dir.mbox"))
-	if !bytes.Equal(a, b) {
-		t.Errorf("stdin and directory differ:\n%s\n----\n%s", a, b)
+	for _, name := range []string{"h.one.mbox", "h.two.mbox"} {
+		a, _ := os.ReadFile(filepath.Join(dir, "stdin", name))
+		b, _ := os.ReadFile(filepath.Join(dir, "dir", name))
+		if len(a) == 0 || !bytes.Equal(a, b) {
+			t.Errorf("%s: stdin and directory differ:\n%s\n----\n%s", name, a, b)
+		}
 	}
 }
 
 // A tarball that breaks off leaves neither the output nor its temporary
-// file.
+// directory.
 func TestExportTruncated(t *testing.T) {
 	dir := t.TempDir()
 	data := tarball(t, false)
-	_, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: filepath.Join(dir, "x.mbox")})
+	_, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: filepath.Join(dir, "x")})
 	if err == nil {
 		t.Error("no error")
 	}
@@ -200,20 +254,17 @@ func TestExportTruncated(t *testing.T) {
 	}
 }
 
-func TestOutName(t *testing.T) {
+func TestBaseName(t *testing.T) {
 	for in, want := range map[string]string{
-		"babbel-net.tar.gz":                 "babbel-net.mbox",
-		"/x/rainbow.tgz":                    "rainbow.mbox",
-		"a.b.tar":                           "a.b.mbox",
-		"/spool/comp/":                      "comp.mbox",
-		"textusenet-backup_9/97comp.tar.gz": "97comp.mbox",
+		"babbel-net.tar.gz":                 "babbel-net",
+		"/x/rainbow.tgz":                    "rainbow",
+		"a.b.tar":                           "a.b",
+		"/spool/comp/":                      "comp",
+		"textusenet-backup_9/97comp.tar.gz": "97comp",
 	} {
-		if got := outName(in, false); got != want {
-			t.Errorf("outName(%q) = %q, want %q", in, got, want)
+		if got := baseName(in); got != want {
+			t.Errorf("baseName(%q) = %q, want %q", in, got, want)
 		}
-	}
-	if got := outName("a.tar.gz", true); got != "a.mbox.gz" {
-		t.Errorf("gz: %q", got)
 	}
 }
 
@@ -253,8 +304,8 @@ func TestMaxDB(t *testing.T) {
 	if err := os.WriteFile(in, tarball(t, false), 0644); err != nil {
 		t.Fatal(err)
 	}
-	st, err := export(in, nil, options{out: filepath.Join(dir, "h.mbox"), dedup: true})
-	if err != nil || st.BigDBs != 1 || st.TooBig != 0 || st.InDB != 0 || st.n != 2 {
+	st, err := export(in, nil, options{out: filepath.Join(dir, "h"), dedup: true})
+	if err != nil || st.BigDBs != 1 || st.TooBig != 0 || st.InDB != 0 || st.n != 3 {
 		t.Fatalf("%+v, %v", st, err)
 	}
 	if s := st.summary(in); !strings.Contains(s, "1 .db files over -max-db (100) skipped") {
@@ -282,7 +333,7 @@ func TestTmpdir(t *testing.T) {
 	if err := os.WriteFile(in, buf.Bytes(), 0644); err != nil {
 		t.Fatal(err)
 	}
-	out := filepath.Join(dir, "out", "g.mbox")
+	out := filepath.Join(dir, "out", "g")
 	os.Mkdir(filepath.Dir(out), 0755)
 	st, err := export(in, nil, options{out: out})
 	if err != nil || st.Listed != 5000 || newscache.TempDir != filepath.Dir(out) {
@@ -292,7 +343,7 @@ func TestTmpdir(t *testing.T) {
 		t.Errorf("left behind: %v", left)
 	}
 	missing := filepath.Join(dir, "no-such-dir")
-	if _, err := export(in, nil, options{out: filepath.Join(dir, "g2.mbox"), tmpdir: missing}); err == nil || !strings.Contains(err.Error(), missing) {
+	if _, err := export(in, nil, options{out: filepath.Join(dir, "g2"), tmpdir: missing}); err == nil || !strings.Contains(err.Error(), missing) {
 		t.Errorf("-tmpdir %s: %v", missing, err)
 	}
 }
@@ -338,7 +389,7 @@ func TestMissingFile(t *testing.T) {
 	}
 	for _, dedup := range []bool{true, false} {
 		missing := filepath.Join(dir, fmt.Sprintf("missing-%t.tsv", dedup))
-		st, err := export(in, nil, options{out: filepath.Join(dir, fmt.Sprintf("h-%t.mbox", dedup)), dedup: dedup, missing: missing})
+		st, err := export(in, nil, options{out: filepath.Join(dir, fmt.Sprintf("h-%t", dedup)), dedup: dedup, missing: missing})
 		if err != nil || st.Missing != 2 || st.listedFound != 1 || st.lost != 1 {
 			t.Fatalf("dedup=%t: %+v, %v", dedup, st, err)
 		}
@@ -353,10 +404,10 @@ func TestMissingFile(t *testing.T) {
 	}
 	// an existing file is not replaced, and nothing is written
 	missing := filepath.Join(dir, "missing-true.tsv")
-	if _, err := export(in, nil, options{out: filepath.Join(dir, "again.mbox"), missing: missing}); err == nil {
+	if _, err := export(in, nil, options{out: filepath.Join(dir, "again"), missing: missing}); err == nil {
 		t.Error("existing -missing file: no error")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "again.mbox")); err == nil {
+	if _, err := os.Stat(filepath.Join(dir, "again")); err == nil {
 		t.Error("existing -missing file: the mbox was written")
 	}
 }
@@ -382,7 +433,7 @@ func (h *eofHook) Read(p []byte) (int, error) {
 // left to block the rerun.
 func TestMissingAfterMbox(t *testing.T) {
 	dir := t.TempDir()
-	out := filepath.Join(dir, "h.mbox")
+	out := filepath.Join(dir, "h")
 	missing := filepath.Join(dir, "missing.tsv")
 	in := &eofHook{r: bytes.NewReader(tarball(t, true)), fn: func() { os.WriteFile(out, []byte("someone else"), 0644) }}
 	if _, err := export("-", in, options{out: out, dedup: true, missing: missing}); err == nil {
@@ -404,8 +455,8 @@ func TestMissingAfterMbox(t *testing.T) {
 // -missing naming the output is refused before anything is read.
 func TestMissingSameAsOut(t *testing.T) {
 	dir := t.TempDir()
-	out := filepath.Join(dir, "h.mbox")
-	_, err := export("-", bytes.NewReader(tarball(t, false)), options{out: out, missing: filepath.Join(dir, ".", "h.mbox")})
+	out := filepath.Join(dir, "h")
+	_, err := export("-", bytes.NewReader(tarball(t, false)), options{out: out, missing: filepath.Join(dir, ".", "h")})
 	if err == nil || !strings.Contains(err.Error(), "is the output") {
 		t.Errorf("err = %v", err)
 	}
@@ -420,16 +471,16 @@ func TestTmpdirCheckedFirst(t *testing.T) {
 	dir := t.TempDir()
 	read := false
 	in := &eofHook{r: bytes.NewReader(tarball(t, false)), fn: func() { read = true }}
-	_, err := export("-", in, options{out: filepath.Join(dir, "h.mbox"), tmpdir: filepath.Join(dir, "no-such-dir")})
+	_, err := export("-", in, options{out: filepath.Join(dir, "h"), tmpdir: filepath.Join(dir, "no-such-dir")})
 	if err == nil || !strings.Contains(err.Error(), "-tmpdir") || read {
 		t.Errorf("err = %v, input read: %t", err, read)
 	}
 }
 
-// -split writes one mbox per group into a directory. A group met again
-// later in the tarball is appended to: here both groups are interleaved,
-// so each file holds two runs (two gzip members with -gzip).
-func TestSplit(t *testing.T) {
+// A group met again later in the tarball is appended to: here both groups
+// are interleaved, so each file holds two runs (two gzip members with
+// -gzip).
+func TestGroupMboxes(t *testing.T) {
 	files := spool()
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -445,11 +496,11 @@ func TestSplit(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Chdir(dir)
-		st, err := export(in, nil, options{dedup: true, split: true, gzip: level})
-		if err != nil || st.out != "h" || st.n != 3 || st.dups != 1 || st.groupFiles != 2 {
+		st, err := export(in, nil, options{dedup: true, gzip: level})
+		if err != nil || st.out != "h" || st.n != 4 || st.dups != 0 || st.groupFiles != 2 {
 			t.Fatalf("level %d: %+v, %v", level, st, err)
 		}
-		if s := st.summary(in); !strings.Contains(s, "3 articles to h/ (2 group files)") {
+		if s := st.summary(in); !strings.Contains(s, "4 articles to h/ (2 group files)") {
 			t.Errorf("summary: %s", s)
 		}
 		ext := ".mbox"
@@ -460,38 +511,29 @@ func TestSplit(t *testing.T) {
 		if len(entries) != 2 || entries[0].Name() != "h.one"+ext || entries[1].Name() != "h.two"+ext {
 			t.Fatalf("level %d: %v", level, entries)
 		}
-		// h.one: .art1 (cross), then the .db's inline article; h.two: .art7
-		// is the crossposted copy, skipped, then .art8
-		for name, want := range map[string][]string{"h.one": {"cross", "inline"}, "h.two": {"no id"}} {
-			heads, _ := readBack(t, filepath.Join("h", name+ext))
-			var subjects []string
-			for _, h := range heads {
-				for _, l := range h {
-					if v, ok := strings.CutPrefix(l, "Subject: "); ok {
-						subjects = append(subjects, v)
-					}
-				}
-			}
-			if !slices.Equal(subjects, want) {
-				t.Errorf("level %d: %s: %q, want %q", level, name, subjects, want)
+		// h.one: .art1 (cross), then the .db's inline article; h.two:
+		// .art7 (cross again), then .art8
+		for name, want := range map[string][]string{"h.one": {"cross", "inline"}, "h.two": {"cross", "no id"}} {
+			if got := subjects(t, filepath.Join("h", name+ext)); !slices.Equal(got, want) {
+				t.Errorf("level %d: %s: %q, want %q", level, name, got, want)
 			}
 		}
 		if left, _ := filepath.Glob(".h.*.tmp"); len(left) != 0 {
 			t.Errorf("temporary directory left: %v", left)
 		}
 		// the directory exists now: not replaced
-		if _, err := export(in, nil, options{split: true, gzip: level}); err == nil {
+		if _, err := export(in, nil, options{gzip: level}); err == nil {
 			t.Error("existing directory: no error")
 		}
 	}
 }
 
-// A failed -split export leaves neither the directory nor its temporary.
-func TestSplitFailed(t *testing.T) {
+// A failed export leaves neither the directory nor its temporary.
+func TestGroupMboxesFailed(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
 	data := tarball(t, false)
-	if _, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: "h", split: true}); err == nil {
+	if _, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: "h"}); err == nil {
 		t.Fatal("truncated tarball: no error")
 	}
 	if left, _ := os.ReadDir("."); len(left) != 0 {

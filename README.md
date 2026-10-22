@@ -224,23 +224,23 @@ The archive.org `textusenet-backup_*` items (30 items, 977 GB) hold `.tar.gz` fi
 hierarchy (`97comp.tar.gz`, `rainbow.tar.gz`, ...), each the spool of a
 [NewsCache](https://github.com/hstraub/NewsCache) server: one directory per newsgroup
 (`rainbow/test` for `rainbow.test`) with a `.db` file and `.artN` files. `ncexport` writes
-such a spool out as one mbox file:
+such a spool out as one mbox per group, in a directory:
 
 ```
 go build -o ncexport ./cmd/ncexport
-ncexport -gzip rainbow.tar.gz                           # writes rainbow.mbox.gz
+ncexport -gzip rainbow.tar.gz                           # rainbow/rainbow.test.mbox.gz, ...
 curl -sL https://archive.org/download/textusenet-backup_9/97comp.tar.gz |
-    ncexport -gzip -o 97comp.mbox.gz -                  # straight from the download
-ncexport -o comp.mbox /var/spool/newscache/comp         # an unpacked spool directory
+    ncexport -gzip -o 97comp -                          # straight from the download
+ncexport -o comp /var/spool/newscache/comp              # an unpacked spool directory
 ncexport -gzip -max-db 64G -tmpdir /big/tmp r.tar.gz    # .db files up to 64 GiB
-ncexport -gzip -split sci.tar.gz                        # one mbox per group: sci/sci.math.mbox.gz, ...
 ```
 
 A tarball is read as a stream in one pass, and it can come from a pipe. Nothing is
 unpacked to disk, except a `.db` over 1 MiB, which goes to a temporary file while it is
 read: in `-tmpdir`, by default the output's directory, not the system's temporary
-directory, which is often small or in RAM. It needs space for the largest `.db`. The output appears under its name only when complete, as with uatexport, and
-an existing one is never replaced.
+directory, which is often small or in RAM. It needs space for the largest `.db`. The
+output directory is built under a temporary name and appears under its own only when
+complete, as with uatexport, and an existing one is never replaced.
 
 - **Where the articles are.** NewsCache stores an article of 15 KB or less inside the `.db`
   and a bigger one in `.artN`. The server behind the backup ran a modified NewsCache that
@@ -250,23 +250,21 @@ an existing one is never replaced.
   ones. Nothing else changes. A few damaged yEnc articles also have lines with a single
   leading dot, which cannot come from doubling: those lines are kept as they are, and the
   summary counts the articles.
-- **Crossposts.** An article crossposted to several groups is in each group's directory.
-  ncexport writes it once, the first time its Message-ID turns up; `-dedup=false` writes
-  every copy.
+- **One mbox per group.** `GROUP.mbox`, or `GROUP.mbox.gz` with `-gzip`. In a file name,
+  characters other than letters, digits and `._+-` become `_`. Only one group file is open
+  at a time. A group the tarball holds in several places (51 of 352 in `sci.tar.gz`) is
+  appended to, gzipped as one more gzip member, which gzip readers (mbox2nntp's, `zcat`)
+  read as one stream. The mbox is mboxrd, with `From nobody DATE` taken from the Date
+  header, as uatexport writes it.
+- **Crossposts.** An article crossposted to several groups is in each group's directory,
+  and goes to each group's mbox. Within one group's mbox an article is written once, the
+  first time its Message-ID turns up; `-dedup=false` writes every copy. Memory for that is
+  bounded by the largest group.
 - **Order.** A tarball's articles are written in the tarball's order, a directory's group by
   group and by article number.
-- **One mbox per group: `-split`.** The output is a directory (`NAME/`, or `-o DIR`) holding
-  `GROUP.mbox` or `GROUP.mbox.gz` per group, built under a temporary name and renamed when
-  complete, like the single mbox. Only one group file is open at a time. A group the
-  tarball holds in several places is appended to, gzipped as one more gzip member, which
-  gzip readers (mbox2nntp's, `zcat`) read as one stream. With `-dedup`, a crossposted
-  article goes to the first of its groups only; its `Newsgroups:` header still names all of
-  them, so a server files it in each. In a file name, characters other than letters,
-  digits and `._+-` become `_`. The mbox is mboxrd, with `From nobody DATE` taken from the
-  Date header, as uatexport writes it.
-- **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
-  files. It also counts the crossposted copies skipped, and the articles a `.db` lists
-  without an `.art` file.
+- **The summary.** It counts the articles, the group files, the groups, the `.art` files
+  and the articles inside `.db` files. It also counts duplicates skipped within a group,
+  and the articles a `.db` lists without an `.art` file.
 - **Listed but not stored: `-missing FILE`.** A group's `.db` lists every article by its
   overview line, but NewsCache stored a crossposted article once, under one of its groups.
   So most listed articles without an `.art` file are in the export after all, from another
@@ -276,7 +274,9 @@ an existing one is never replaced.
   Message-ID, tab-separated, to find them in other archives. The summary then splits the
   count. Until the end, the overview fields of the listed articles wait in a temporary file
   in `-tmpdir`, about 150 bytes each, as a tarball holds a group's `.db` before its
-  articles. Articles crossposted to a hierarchy in another tarball count as missing.
+  articles, and every exported Message-ID is kept in memory for the lookup (about
+  100 bytes each). Articles crossposted to a hierarchy in another tarball count as
+  missing.
 - **The `.db`.** It is read one record at a time, never whole: the table of record offsets
   through a buffer, then each record where the table points. NewsCache places records and
   the table anywhere in the file, so it cannot be read front to back. A big group's `.db`
@@ -292,9 +292,10 @@ an existing one is never replaced.
 
 Checked on `97comp.tar.gz` (757 articles) and `rainbow.tar.gz` (518 articles from 616
 files in 34 groups). Every article mbox2nntp's parser reads back from the mbox equals the
-stored one, with line ends and dots undone. Then give the `.mbox.gz` to mbox2nntp. Expect
-it to skip articles with an empty body (24 in `97comp`), which some spam has, and yEnc
-binaries unless `-keep-binary` is given.
+stored one, with line ends and dots undone. Then give each group's `.mbox.gz` to
+mbox2nntp, one run per file (`for f in 97comp/*.mbox.gz; do mbox2nntp -server … "$f"; done`);
+each is renamed `.done` on its own. Expect it to skip articles with an empty body (24 in
+`97comp`), which some spam has, and yEnc binaries unless `-keep-binary` is given.
 
 Other programs can read NewsCache spools with the package
 `github.com/go-while/mbox2nntp/newscache` (standard library only); `newscache/newscachetest`
