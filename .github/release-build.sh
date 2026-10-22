@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds the release archives into dist/: mbox2nntp, uatexport, ncexport and iafetch for each
-# target, with README.md and LICENSE, plus a SHA-256 checksum file.
+# target, with README.md, CHANGELOG.md and LICENSE, plus a SHA-256 checksum file.
 # Used by .github/workflows/release.yml; runs the same on a Linux machine.
 #
 #   .github/release-build.sh v0.1.0
@@ -32,7 +32,7 @@ for target in $targets; do
 		CGO_ENABLED=0 GOOS=$goos GOARCH=$goarch \
 			go -C "$mod" build -trimpath -ldflags "$ldflags" -o "$PWD/$dir/$bin$ext" "$pkg"
 	done
-	cp README.md LICENSE "$dir/"
+	cp README.md CHANGELOG.md LICENSE "$dir/"
 	if [[ $goos == windows ]]; then
 		(cd dist && zip -q -r "$name.zip" "$name")
 	else
