@@ -45,7 +45,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat > notes.md <<'EOF'
-          Each archive holds `mbox2nntp`, `uatexport`, `ncexport` and `iafetch` for one system, with README and LICENSE; unpack and run, nothing to install. Check downloads against the `_checksums.txt` file (`sha256sum -c`).
+          Each archive holds `mbox2nntp`, `uatexport`, `ncexport` and `iafetch` for one system, with README, CHANGELOG and LICENSE; unpack and run, nothing to install. Check downloads against the `_checksums.txt` file (`sha256sum -c`).
 
           `.gz`, `.zip`, mbox and directory inputs, ncexport and iafetch need no other program. `.7z` inputs need 7-Zip, UAT archives (`.usenet`) need zstd, and `.usenet.xz` needs xz or 7-Zip: see the README.
           EOF
