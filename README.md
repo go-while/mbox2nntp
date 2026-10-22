@@ -233,8 +233,9 @@ curl -sL https://archive.org/download/textusenet-backup_9/97comp.tar.gz |
 ncexport -o comp.mbox /var/spool/newscache/comp         # an unpacked spool directory
 ```
 
-A tarball is read as a stream in one pass: nothing is unpacked to disk, and it can come
-from a pipe. The output appears under its name only when complete, as with uatexport, and
+A tarball is read as a stream in one pass, and it can come from a pipe. Nothing is
+unpacked to disk, except a `.db` over 1 MiB, which goes to a temporary file while it is
+read. The output appears under its name only when complete, as with uatexport, and
 an existing one is never replaced.
 
 - **Where the articles are.** NewsCache stores an article of 15 KB or less inside the `.db`
@@ -254,10 +255,14 @@ an existing one is never replaced.
 - **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
   files. It also counts the crossposted copies skipped, and the articles the `.db` lists
   but the spool does not have (overview only, never fetched by the cache).
-- **Size limits.** An `.artN` file over 1 MiB or a `.db` over 256 MiB is skipped with a
-  warning, and counted in the summary. Text articles are mostly under 16 KB, and servers
-  rarely take one over 256 KB. The limits also keep a broken or crafted file from being
-  read into memory whole. uatexport skips UAT messages over 1 MiB the same way.
+- **The `.db`.** It is read one record at a time, never whole: the table of record offsets
+  through a buffer, then each record where the table points. NewsCache places records and
+  the table anywhere in the file, so it cannot be read front to back. A big group's `.db`
+  costs time, not memory.
+- **Size limits.** An article over 1 MiB, as an `.artN` file or inside a `.db`, is skipped
+  with a warning and counted in the summary. Text articles are mostly under 16 KB, and
+  servers rarely take one over 256 KB. A `.db` over 4 GiB, the most a 32-bit NewsCache
+  can address, is skipped too. uatexport skips UAT messages over 1 MiB the same way.
 
 Checked on `97comp.tar.gz` (757 articles) and `rainbow.tar.gz` (518 articles from 616
 files in 34 groups). Every article mbox2nntp's parser reads back from the mbox equals the

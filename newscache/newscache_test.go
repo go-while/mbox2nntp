@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -35,9 +36,9 @@ func TestParseDB(t *testing.T) {
 				t.Fatalf("%v/%d: %v", bo, w, err)
 			}
 			want := []Record{
-				{2, Overview, []byte(dbRecs[2].Data)},
-				{3, Article, []byte(small)},
-				{5, BigArticle, []byte(dbRecs[5].Data)},
+				{2, Overview, []byte(dbRecs[2].Data), int64(len(dbRecs[2].Data) + 1)},
+				{3, Article, []byte(small), int64(len(small) + 1)},
+				{5, BigArticle, []byte(dbRecs[5].Data), int64(len(dbRecs[5].Data) + 1)},
 			}
 			if db.First != 2 || db.Last != 6 || !reflect.DeepEqual(db.Records, want) || db.Mtime.Year() != 2020 {
 				t.Errorf("%v/%d: %d-%d %+v, mtime %v", bo, w, db.First, db.Last, db.Records, db.Mtime)
@@ -295,4 +296,134 @@ func TestTooBig(t *testing.T) {
 	items = nil
 	st, err = ReadDir(root, collect(&items))
 	check("dir", items, st, err)
+}
+
+// tableAtEnd moves the offset table of a .db made by newscachetest.DB to
+// the end of the file and clears the old one, as NewsCache leaves it once
+// a growing article range made it allocate a new table.
+func tableAtEnd(b []byte, w int) []byte {
+	bo := binary.LittleEndian
+	get := func(off int) int {
+		if w == 8 {
+			return int(bo.Uint64(b[off:]))
+		}
+		return int(bo.Uint32(b[off:]))
+	}
+	put := func(b []byte, off, v int) {
+		if w == 8 {
+			bo.PutUint64(b[off:], uint64(v))
+		} else {
+			bo.PutUint32(b[off:], uint32(v))
+		}
+	}
+	old := get(8 + 4*w)
+	n := get(old+w) - get(old) + 1
+	tlen := (2 + n) * w
+	out := slices.Clone(b)
+	at := (len(out)+15)&^15 + w
+	out = append(out, make([]byte, at-len(out)+tlen)...)
+	copy(out[at:], b[old:old+tlen])
+	clear(out[old : old+tlen])
+	put(out, 8+4*w, at)
+	put(out, 8, len(out))
+	return out
+}
+
+// sizedReader is an io.ReaderAt that remembers the largest read.
+type sizedReader struct {
+	r   *bytes.Reader
+	max int
+}
+
+func (s *sizedReader) ReadAt(p []byte, off int64) (int, error) {
+	s.max = max(s.max, len(p))
+	return s.r.ReadAt(p, off)
+}
+
+// ReadDB reads a .db in any layout, one record at a time: never more than
+// its 64 KiB table buffer at once, however big the file.
+func TestReadDB(t *testing.T) {
+	long := strings.Repeat("y", 3000) // longer than the first read of a record
+	recs := map[uint64]newscachetest.Record{}
+	for i := uint64(1); i <= 20000; i++ {
+		recs[i] = newscachetest.Record{Type: newscachetest.Overview, Data: fmt.Sprintf("%d\tsubject %d\ta@b\tdate\t<%d@x>\t\t100\t3\t", i, i, i)}
+	}
+	recs[7] = newscachetest.Record{Type: newscachetest.Article, Data: small}
+	recs[8] = newscachetest.Record{Type: newscachetest.Article, Data: long}
+	for _, w := range []int{4, 8} {
+		for _, moved := range []bool{false, true} {
+			b := newscachetest.DB(binary.LittleEndian, w, 1, 20000, recs)
+			if moved {
+				b = tableAtEnd(b, w)
+			}
+			sr := &sizedReader{r: bytes.NewReader(b)}
+			var got []Record
+			db, err := ReadDB(sr, int64(len(b)), func(r Record) error {
+				got = append(got, r)
+				return nil
+			})
+			what := fmt.Sprintf("w=%d moved=%t", w, moved)
+			if err != nil || db.First != 1 || db.Last != 20000 || len(got) != 20000 {
+				t.Fatalf("%s: %v, %+v, %d records", what, err, db, len(got))
+			}
+			for _, r := range got {
+				if string(r.Data) != recs[r.Num].Data || r.Type != recs[r.Num].Type {
+					t.Fatalf("%s: article %d: %d %.40q", what, r.Num, r.Type, r.Data)
+				}
+			}
+			if len(b) < 1<<20 || sr.max > 1<<16 {
+				t.Errorf("%s: file %d bytes, largest read %d", what, len(b), sr.max)
+			}
+		}
+	}
+
+	// an error from fn stops it and comes back as it is
+	stop := errors.New("stop")
+	b := newscachetest.DB(binary.LittleEndian, 8, 2, 6, dbRecs)
+	calls := 0
+	if _, err := ReadDB(bytes.NewReader(b), int64(len(b)), func(Record) error { calls++; return stop }); err != stop || calls != 1 {
+		t.Errorf("fn's error: %v after %d calls", err, calls)
+	}
+}
+
+// A record over MaxArticleSize is skipped and counted; the rest of the
+// .db is still read.
+func TestDBRecordTooBig(t *testing.T) {
+	saved := MaxArticleSize
+	t.Cleanup(func() { MaxArticleSize = saved })
+	MaxArticleSize = int64(len(small)) - 1
+	var items []got
+	st, err := ReadTar(bytes.NewReader(writeTar(t, spool(), []string{"x/y/.art2", "x/y/.db"}, false)), collect(&items))
+	if err != nil || st.TooBig != 2 || st.InDB != 0 || st.Listed != 2 || st.BadDBs != 0 {
+		// .art2 (big) and the inline article 3 (small) are over the limit
+		t.Errorf("%+v %+v %v", items, st, err)
+	}
+	if len(st.Problems) != 2 || !strings.Contains(st.Problems[1], "article 3") {
+		t.Errorf("problems %q", st.Problems)
+	}
+}
+
+// From a tarball, a .db over dbInMemory goes through a temporary file,
+// which is removed; the result is the same.
+func TestReadTarDBTempFile(t *testing.T) {
+	saved := dbInMemory
+	t.Cleanup(func() { dbInMemory = saved })
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("TMP", tmp) // Windows
+	files := spool()
+	files["x/y/.db"] = tableAtEnd(files["x/y/.db"], 8)
+	data := writeTar(t, files, []string{"x/y/.art2", "x/y/z/.art1", "x/.active", "x/y/.db"}, true)
+	want := []got{{"x.y", 2, false, "big"}, {"x.y.z", 1, false, "small"}, {"x.y", 3, true, "small"}}
+	for _, limit := range []int64{saved, 0} {
+		dbInMemory = limit
+		var items []got
+		st, err := ReadTar(bytes.NewReader(data), collect(&items))
+		if err != nil || !reflect.DeepEqual(items, want) || !reflect.DeepEqual(st, wantStats()) {
+			t.Errorf("dbInMemory=%d: %+v %+v %v", limit, items, st, err)
+		}
+	}
+	if left, _ := os.ReadDir(tmp); len(left) != 0 {
+		t.Errorf("temporary files left: %v", left)
+	}
 }

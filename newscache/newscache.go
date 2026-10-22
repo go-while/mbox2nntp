@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path"
 	"path/filepath"
@@ -52,6 +53,9 @@ type Record struct {
 	Num  uint64
 	Type byte
 	Data []byte // the overview line or the article, without the final NUL
+	// Size is the length of the record after its type byte, as stored.
+	// Data is nil when that is over MaxArticleSize.
+	Size int64
 }
 
 // A DB is a parsed .db file.
@@ -61,13 +65,39 @@ type DB struct {
 	Records     []Record // in number order, numbers without a record left out
 }
 
-// ParseDB reads a .db file. It takes the layouts of 32-bit and 64-bit
-// builds in either byte order. When a record points outside the file it
-// returns the records read so far with the error.
+// ParseDB parses a .db held in memory. When a record points outside the
+// file it returns the records read so far with the error. ReadDB reads one
+// without holding it whole.
 func ParseDB(b []byte) (*DB, error) {
+	var recs []Record
+	db, err := ReadDB(bytes.NewReader(b), int64(len(b)), func(r Record) error {
+		recs = append(recs, r)
+		return nil
+	})
+	if db != nil {
+		db.Records = recs
+	}
+	return db, err
+}
+
+// ReadDB reads a .db of size bytes from r and calls fn for each record in
+// number order; the DB it returns has no Records. It takes the layouts of
+// 32-bit and 64-bit builds in either byte order.
+//
+// The file is never held whole. NewsCache allocates the records and the
+// table of their offsets anywhere in the file, first fit, and moves the
+// table when the article range grows, so the file is not in any order.
+// ReadDB reads the table through a buffered reader and each record, one at
+// a time, where the table points. When a record points outside the file it
+// returns the error after the records before it went to fn. An error from
+// fn stops the reading and is returned as it is.
+func ReadDB(r io.ReaderAt, size int64, fn func(Record) error) (*DB, error) {
+	var hdr [8 + 5*8]byte
+	n, _ := r.ReadAt(hdr[:], 0)
+	b := hdr[:n]
 	var (
 		bo binary.ByteOrder
-		w  int // the size of an unsigned long in the build that wrote b
+		w  int // the size of an unsigned long in the build that wrote it
 	)
 	for _, o := range []binary.ByteOrder{binary.LittleEndian, binary.BigEndian} {
 		if len(b) < 8 || o.Uint32(b[4:]) != 2 { // the format version
@@ -83,14 +113,22 @@ func ParseDB(b []byte) (*DB, error) {
 	if bo == nil {
 		return nil, errors.New("not a NewsCache .db (NVcontainer version 2)")
 	}
+	fsize := uint64(size)
+	get := func(p []byte) uint64 {
+		if w == 8 {
+			return bo.Uint64(p)
+		}
+		return uint64(bo.Uint32(p))
+	}
+	var wbuf [8]byte
 	word := func(off uint64) (uint64, bool) {
-		if off > uint64(len(b)) || uint64(len(b))-off < uint64(w) {
+		if off > fsize || fsize-off < uint64(w) {
 			return 0, false
 		}
-		if w == 8 {
-			return bo.Uint64(b[off:]), true
+		if _, err := r.ReadAt(wbuf[:w], int64(off)); err != nil {
+			return 0, false
 		}
-		return uint64(bo.Uint32(b[off:])), true
+		return get(wbuf[:w]), true
 	}
 	db := &DB{}
 	mtime, ok1 := word(8 + uint64(w))
@@ -110,28 +148,65 @@ func ParseDB(b []byte) (*DB, error) {
 	if first > last {
 		return db, nil
 	}
-	n := last - first + 1
+	count := last - first + 1
 	tab := userdata + 2*uint64(w)
-	if n > uint64(len(b))/uint64(w) || tab+n*uint64(w) > uint64(len(b)) {
+	if count > fsize/uint64(w) || tab+count*uint64(w) > fsize {
 		return nil, fmt.Errorf("article range %d-%d does not fit the file", first, last)
 	}
 	db.First, db.Last = first, last
-	for i := range n {
-		off, _ := word(tab + i*uint64(w))
+	table := bufio.NewReaderSize(io.NewSectionReader(r, int64(tab), int64(count*uint64(w))), 1<<16)
+	// most records are an overview line or a small article: one read gets
+	// the size word and the record together
+	buf := make([]byte, 1024)
+	for i := range count {
+		if _, err := io.ReadFull(table, wbuf[:w]); err != nil {
+			return db, fmt.Errorf("offset table: %w", err)
+		}
+		off := get(wbuf[:w])
 		if off == 0 {
 			continue
 		}
-		size, ok := word(off)
+		bad := fmt.Errorf("record of article %d at %#x is outside the file", first+i, off)
+		if off > fsize || fsize-off < uint64(w) {
+			return db, bad
+		}
+		k, err := r.ReadAt(buf, int64(off))
+		if err != nil && err != io.EOF {
+			return db, err
+		}
+		if k < w {
+			return db, bad
+		}
+		rsize := get(buf[:w])
 		start := off + uint64(w)
-		if !ok || size == 0 || size > uint64(len(b)) || start+size > uint64(len(b)) {
-			return db, fmt.Errorf("record of article %d at %#x is outside the file", first+i, off)
+		if rsize == 0 || rsize > fsize || start+rsize > fsize {
+			return db, bad
 		}
-		data := b[start : start+size]
-		r := Record{Num: first + i, Type: data[0], Data: data[1:]}
-		if k := len(r.Data); k > 0 && r.Data[k-1] == 0 {
-			r.Data = r.Data[:k-1]
+		rec := Record{Num: first + i, Size: int64(rsize) - 1}
+		p := buf[w:k]
+		if uint64(len(p)) >= rsize {
+			p = bytes.Clone(p[:rsize])
+		} else {
+			// longer than buf: read it on its own, or only its type
+			// byte when it is over the limit
+			p = make([]byte, 1)
+			if rec.Size <= MaxArticleSize {
+				p = make([]byte, rsize)
+			}
+			if _, err := r.ReadAt(p, int64(start)); err != nil {
+				return db, fmt.Errorf("record of article %d at %#x: %w", first+i, off, err)
+			}
 		}
-		db.Records = append(db.Records, r)
+		rec.Type = p[0]
+		if rec.Size <= MaxArticleSize {
+			rec.Data = p[1:]
+		}
+		if k := len(rec.Data); k > 0 && rec.Data[k-1] == 0 {
+			rec.Data = rec.Data[:k-1]
+		}
+		if err := fn(rec); err != nil {
+			return db, err
+		}
 	}
 	return db, nil
 }
@@ -194,20 +269,27 @@ type Stats struct {
 	Listed   int // .db records of an article that is not inside the .db
 	Missing  int // of those, how many have no .artN either: not in the backup
 	Other    int // other files, skipped
-	TooBig   int // .artN and .db files over MaxArticleSize or MaxDBSize, skipped
+	TooBig   int // .artN files and .db records over MaxArticleSize, and .db files over MaxDBSize, skipped
 	Problems []string
 }
 
-// The largest .artN and .db files read; a bigger one is skipped, and
-// counted in Stats.TooBig. Text articles are mostly under 16 KB, and
-// servers rarely take one over 256 KB. A .db holds the overview and the
-// articles of 15 KB or less. The limits also keep a broken or crafted file
-// from being held in memory whole: in a tarball a few KB of gzip can stand
-// for gigabytes.
+// The largest article, as an .artN file or a .db record, and the largest
+// .db file read; a bigger one is skipped, and counted in Stats.TooBig.
+// Text articles are mostly under 16 KB, and servers rarely take one over
+// 256 KB. A .db is never held whole (see ReadDB): it holds an overview
+// line per article, and NewsCache keeps the articles of 15 KB or less in
+// it too, so a big group's .db can be large. MaxDBSize, the most a 32-bit
+// NewsCache can address, only stops a broken or crafted file: in a
+// tarball a few KB of gzip can stand for gigabytes, and a .db from a
+// tarball goes to a temporary file.
 var (
 	MaxArticleSize int64 = 1 << 20
-	MaxDBSize      int64 = 256 << 20
+	MaxDBSize      int64 = 4 << 30
 )
+
+// A .db from a tarball up to this size is read into memory; a bigger one
+// is copied to a temporary file, as ReadDB needs to read it out of order.
+var dbInMemory int64 = 1 << 20 // a var for the tests
 
 // tooBig reports, and counts, a file over its limit.
 func (s *scan) tooBig(name string, size int64, isArt bool) bool {
@@ -255,32 +337,60 @@ func (s *scan) problem(format string, a ...any) {
 	}
 }
 
-// db takes a .db file. Its inline articles are returned, not passed to fn,
-// so that ReadDir can merge them with the .artN files in number order.
-func (s *scan) db(group, name string, data []byte) []Item {
+// db reads a .db file of size bytes from r. Its inline articles go to
+// emit, in number order; an error from emit stops it and is returned.
+// A .db that does not parse is counted and reported, not an error.
+func (s *scan) db(group, name string, r io.ReaderAt, size int64, emit func(Item) error) error {
 	g := s.group(group)
 	s.st.DBs++
-	db, err := ParseDB(data)
+	var emitErr error
+	_, err := ReadDB(r, size, func(rec Record) error {
+		switch {
+		case rec.Data == nil && rec.Size > MaxArticleSize:
+			s.st.TooBig++
+			s.problem("%s: article %d: %d bytes, over the limit of %d, skipped", name, rec.Num, rec.Size, MaxArticleSize)
+		case rec.Type == Article:
+			s.st.InDB++
+			emitErr = emit(Item{Group: group, Num: rec.Num, Text: rec.Data, InDB: true})
+			return emitErr
+		case rec.Type == Overview || rec.Type == BigArticle:
+			g.listed = append(g.listed, rec.Num)
+		default:
+			s.problem("%s: article %d: record type %d", name, rec.Num, rec.Type)
+		}
+		return nil
+	})
+	if emitErr != nil {
+		return emitErr
+	}
 	if err != nil {
 		s.st.BadDBs++
 		s.problem("%s: %v", name, err)
-		if db == nil {
-			return nil
-		}
 	}
-	var items []Item
-	for _, r := range db.Records {
-		switch r.Type {
-		case Article:
-			items = append(items, Item{Group: group, Num: r.Num, Text: r.Data, InDB: true})
-		case Overview, BigArticle:
-			g.listed = append(g.listed, r.Num)
-		default:
-			s.problem("%s: article %d: record type %d", name, r.Num, r.Type)
+	return nil
+}
+
+// tarDB reads a .db from a tar entry: in memory when it is small, else
+// through a temporary file, removed afterwards.
+func (s *scan) tarDB(group, name string, tr io.Reader, size int64) error {
+	if size <= dbInMemory {
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return fmt.Errorf("%s: %w", name, err)
 		}
+		return s.db(group, name, bytes.NewReader(data), int64(len(data)), s.fn)
 	}
-	s.st.InDB += len(items)
-	return items
+	f, err := os.CreateTemp("", "newscache-*.db")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	n, err := io.Copy(f, tr)
+	if err != nil {
+		return fmt.Errorf("%s: %w", name, err)
+	}
+	return s.db(group, name, f, n, s.fn)
 }
 
 func (s *scan) file(group string, num uint64, text []byte) error {
@@ -288,15 +398,6 @@ func (s *scan) file(group string, num uint64, text []byte) error {
 	g.files = append(g.files, num)
 	s.st.Files++
 	return s.fn(Item{Group: group, Num: num, Text: text})
-}
-
-func (s *scan) emit(items []Item) error {
-	for _, it := range items {
-		if err := s.fn(it); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *scan) finish() Stats {
@@ -359,16 +460,17 @@ func ReadTar(r io.Reader, fn func(Item) error) (Stats, error) {
 		if s.tooBig(h.Name, h.Size, isArt) {
 			continue
 		}
+		if !isArt {
+			if err := s.tarDB(group, h.Name, tr, h.Size); err != nil {
+				return s.st, err
+			}
+			continue
+		}
 		data, err := io.ReadAll(tr)
 		if err != nil {
 			return s.st, fmt.Errorf("%s: %w", h.Name, err)
 		}
-		if isArt {
-			err = s.file(group, num, data)
-		} else {
-			err = s.emit(s.db(group, h.Name, data))
-		}
-		if err != nil {
+		if err := s.file(group, num, data); err != nil {
 			return s.st, err
 		}
 	}
@@ -397,55 +499,71 @@ func ReadDir(root string, fn func(Item) error) (Stats, error) {
 		if err != nil {
 			return err
 		}
-		// the .db's articles, and the .artN files by their names
-		type entry struct {
-			Item
+		// the .artN files by number, merged with the .db's articles as
+		// ReadDB returns them, also in number order
+		type art struct {
+			num  uint64
 			file string
 		}
-		var items []entry
+		var arts []art
+		var dbName string
+		var dbSize int64
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
 			num, isArt := ArtNum(e.Name())
-			if isArt || e.Name() == ".db" {
-				fi, err := e.Info()
-				if err != nil {
-					return err
-				}
-				if s.tooBig(filepath.Join(dir, e.Name()), fi.Size(), isArt) {
-					continue
-				}
-			}
-			switch {
-			case isArt:
-				items = append(items, entry{Item{Group: group, Num: num}, e.Name()})
-			case e.Name() == ".db":
-				name := filepath.Join(dir, ".db")
-				data, err := os.ReadFile(name)
-				if err != nil {
-					return err
-				}
-				for _, it := range s.db(group, name, data) {
-					items = append(items, entry{Item: it})
-				}
-			default:
+			if !isArt && e.Name() != ".db" {
 				s.st.Other++
+				continue
 			}
-		}
-		slices.SortStableFunc(items, func(a, b entry) int { return cmp.Compare(a.Num, b.Num) })
-		for _, it := range items {
-			if it.InDB {
-				err = s.fn(it.Item)
-			} else {
-				var text []byte
-				if text, err = os.ReadFile(filepath.Join(dir, it.file)); err == nil {
-					err = s.file(group, it.Num, text)
-				}
-			}
+			fi, err := e.Info()
 			if err != nil {
 				return err
 			}
+			name := filepath.Join(dir, e.Name())
+			if s.tooBig(name, fi.Size(), isArt) {
+				continue
+			}
+			if isArt {
+				arts = append(arts, art{num, e.Name()})
+			} else {
+				dbName, dbSize = name, fi.Size()
+			}
+		}
+		slices.SortStableFunc(arts, func(a, b art) int { return cmp.Compare(a.num, b.num) })
+		next := 0
+		// artsUpTo passes on the .artN files up to number n
+		artsUpTo := func(n uint64) error {
+			for ; next < len(arts) && arts[next].num <= n; next++ {
+				text, err := os.ReadFile(filepath.Join(dir, arts[next].file))
+				if err != nil {
+					return err
+				}
+				if err := s.file(group, arts[next].num, text); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+		if dbName != "" {
+			f, err := os.Open(dbName)
+			if err != nil {
+				return err
+			}
+			err = s.db(group, dbName, f, dbSize, func(it Item) error {
+				if err := artsUpTo(it.Num); err != nil {
+					return err
+				}
+				return s.fn(it)
+			})
+			f.Close()
+			if err != nil {
+				return err
+			}
+		}
+		if err := artsUpTo(math.MaxUint64); err != nil {
+			return err
 		}
 		return nil
 	})
