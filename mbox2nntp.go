@@ -592,7 +592,7 @@ func mvmbox(mboxfile string) {
 func read_file(file_path string) string {
 
 	if fi, err := os.Stat(file_path); err == nil && fi.Size() > int64(maxArticleSize) {
-		log.Printf("ERROR read_file(%s): %d bytes, %v", file_path, fi.Size(), errArticleTooBig)
+		log.Printf("read_file(%s): %d bytes, %v, not sent", file_path, fi.Size(), errArticleTooBig)
 		return ""
 	}
 	lines, err0 := ioutil.ReadFile(file_path)
@@ -1188,13 +1188,23 @@ func openMboxFile(mboxfile string) (*mbox.MboxStream, *eofReader) {
 	return mboxReader, src
 }
 
-// maxArticleSize caps an article read from an mbox or from a file in a
-// directory. A bigger one is a broken or hostile input, and would be held in
-// memory whole, then copied. The mbox parser also limits the length of a
-// line (mbox.MaxLineLength), and package uat the size of a message.
-var maxArticleSize = 256 << 20 // a var for the tests
+// maxArticleSize caps the body of an article from an mbox, and the size of
+// an article file in a directory. Text articles are mostly under 16 KB, and
+// servers rarely take one over 256 KB; a bigger one is not sent, and counts
+// as rejected (437), as the server would answer. The cap also keeps a
+// broken or hostile input from being held in memory whole. The mbox parser
+// limits the length of a line (mbox.MaxLineLength, 1 MiB), and package uat
+// the size of a message (uat.MaxMessageSize, 1 MiB).
+var maxArticleSize = 1 << 20 // a var for the tests
 
-var errArticleTooBig = errors.New("article over the size limit (256 MiB)")
+var errArticleTooBig = errors.New("article over the size limit (1 MiB)")
+
+// countTooBig counts an article over maxArticleSize, which is not sent, as
+// a 437: the input can still be marked done.
+func countTooBig() {
+	globalCounter.addCounter(0, "total", 1)
+	globalCounter.addCounter(0, "wnntperr437", 1)
+}
 
 // readBody reads a message body into lines without their line endings.
 // isbinary is set, and the body left out, when DROPBINARY is on and a line
@@ -1251,7 +1261,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 	msgNumber := 0
 	msgcnt := 0
 	skipped := 0
-	dropped := 0 // over maxArticleSize
+	tooBig := 0 // over maxArticleSize
 	var lastReadErr, prevErr error
 	stoppedEarly := false
 	//msgidmap := make(map[string]int)
@@ -1311,8 +1321,9 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 		body, isbinary, berr := readBody(message.BodyReader())
 		if berr == errArticleTooBig {
-			dropped++
-			log.Printf("[iterateMbox] ERROR: file='%s' msgNumber=%d msgid='%s': %v, dropped, not marking done", mboxfile, msgNumber, msgid, berr)
+			tooBig++
+			countTooBig()
+			log.Printf("[iterateMbox] file='%s' msgNumber=%d msgid='%s': %v, not sent, counted as 437", mboxfile, msgNumber, msgid, berr)
 			continue
 		}
 		if berr != nil {
@@ -1353,7 +1364,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 		}
 	}
 	nearMisses, nearMissSamples := mboxReader.NearMisses()
-	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d too-big=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, dropped, nearMisses, stoppedEarly, lastReadErr)
+	log.Printf("[iterateMbox] Done read mbox file='%s' msgNumber=%d skipped=%d too-big=%d near-misses=%d stopped-early=%t last-err=%v", mboxfile, msgNumber, skipped, tooBig, nearMisses, stoppedEarly, lastReadErr)
 	// near-misses are body lines starting "From " or "#! rnews " that validid
 	// rejected: either ordinary text, or a separator shape validid does not
 	// know, in which case articles were merged. The samples tell which.
@@ -1363,7 +1374,7 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 
 	//close(worker_channel)
 
-	finishFeeding(stoppedEarly || dropped > 0)
+	finishFeeding(stoppedEarly)
 } // end func iterateMbox
 
 // finishFeeding is called when the reader has queued its last article: it

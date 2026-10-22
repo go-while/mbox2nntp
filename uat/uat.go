@@ -40,11 +40,12 @@ const (
 	metaRecSize = 16 // RawImportMeta: uint64 offset, uint32 size, uint32 compressed size
 )
 
-// MaxMessageSize is the largest message Each accepts. The size of each
-// message is taken from the package; a bigger one is a broken or crafted
-// file, and is an error. Below it, memory is taken as the data arrives, so a
-// size that is a lie costs no more than the data that is really there.
-var MaxMessageSize = 256 << 20
+// MaxMessageSize is the largest message Each passes on. Text articles are
+// mostly under 16 KB, and servers rarely take one over 256 KB. A bigger
+// message is read past and counted in Package.TooBig. Memory is taken as
+// the data arrives, so a size in the package that is a lie costs no more
+// than the data that is really there.
+var MaxMessageSize = 1 << 20
 
 type section struct{ off, size int64 }
 
@@ -53,6 +54,7 @@ type Package struct {
 	Name      string // the newsgroup, from the package's "name" file
 	DescShort string // its short description, often empty
 	Version   int
+	TooBig    int // messages over MaxMessageSize, skipped by Each
 	f         *os.File
 	files     map[string]section
 	meta      []byte
@@ -223,7 +225,11 @@ func (p *Package) split(r io.Reader, fn func(i int, msg []byte) error) error {
 	for i := 0; i < p.Count(); i++ {
 		_, size, _ := p.entry(i)
 		if int64(size) > int64(MaxMessageSize) {
-			return fmt.Errorf("message %d of %d: %d bytes, over the limit of %d", i, p.Count(), size, MaxMessageSize)
+			if n, err := io.CopyN(io.Discard, r, int64(size)); err != nil {
+				return fmt.Errorf("message %d of %d: zstd output ended early, after %d of %d bytes: %v", i, p.Count(), n, size, err)
+			}
+			p.TooBig++
+			continue
 		}
 		buf = buf[:0]
 		for len(buf) < int(size) {

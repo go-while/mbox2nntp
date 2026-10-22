@@ -94,11 +94,15 @@ func main() {
 		os.Exit(1)
 	}
 	log.Printf("%s: %d articles to %s, %d header fields re-encoded, %d left with non-ASCII", st.group, st.n, st.out, st.encoded, st.raw)
+	if st.tooBig > 0 {
+		log.Printf("%s: %d articles over %d bytes skipped", st.group, st.tooBig, uat.MaxMessageSize)
+	}
 }
 
 type stats struct {
 	group, out      string
 	n, encoded, raw int
+	tooBig          int
 }
 
 func export(input string, o options) (st stats, err error) {
@@ -178,6 +182,7 @@ func export(input string, o options) (st stats, err error) {
 		st.n++
 		return w.write(i, head, body)
 	})
+	st.tooBig = p.TooBig
 	if err != nil {
 		w.abort()
 		return st, err

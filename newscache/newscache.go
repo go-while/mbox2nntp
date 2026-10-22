@@ -198,12 +198,15 @@ type Stats struct {
 	Problems []string
 }
 
-// The largest .artN and .db files read. A bigger one is a broken or crafted
-// file, and would be held in memory whole: in a tarball a few KB of gzip can
-// stand for gigabytes. It is skipped, and counted in Stats.TooBig.
+// The largest .artN and .db files read; a bigger one is skipped, and
+// counted in Stats.TooBig. Text articles are mostly under 16 KB, and
+// servers rarely take one over 256 KB. A .db holds the overview and the
+// articles of 15 KB or less. The limits also keep a broken or crafted file
+// from being held in memory whole: in a tarball a few KB of gzip can stand
+// for gigabytes.
 var (
-	MaxArticleSize int64 = 256 << 20
-	MaxDBSize      int64 = 1 << 30
+	MaxArticleSize int64 = 1 << 20
+	MaxDBSize      int64 = 256 << 20
 )
 
 // tooBig reports, and counts, a file over its limit.

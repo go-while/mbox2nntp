@@ -81,12 +81,15 @@ func procUAT(input, suffix string) string {
 		worker_channel <- &ArticleItem{msgid: msgid, head: head, body: body}
 		return nil
 	})
+	for range p.TooBig {
+		countTooBig()
+	}
 	stoppedEarly := err != nil
 	if stoppedEarly {
 		log.Printf("[procUAT] ERROR: '%s': %v, not marking done", path, err)
 	}
-	log.Printf("[procUAT] Done read '%s' messages=%d no-msgid=%d binary=%d empty=%d re-encoded-fields=%d added-mime-version=%d stopped-early=%t",
-		path, p.Count(), nomsgid, binary, empty, encoded, fixedMIME, stoppedEarly)
+	log.Printf("[procUAT] Done read '%s' messages=%d no-msgid=%d binary=%d empty=%d too-big=%d re-encoded-fields=%d added-mime-version=%d stopped-early=%t",
+		path, p.Count(), nomsgid, binary, empty, p.TooBig, encoded, fixedMIME, stoppedEarly)
 	if len(raw) > 0 {
 		names := make([]string, 0, len(raw))
 		for name := range raw {

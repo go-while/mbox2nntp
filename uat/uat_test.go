@@ -262,24 +262,28 @@ func TestFold(t *testing.T) {
 	}
 }
 
-// A size over MaxMessageSize is an error. A size under it that the data
-// does not back costs memory only for the data there is: a 99 KB file
-// used to make Each allocate 3 GiB.
+// A message over MaxMessageSize is skipped and counted, and the next one
+// still comes. A size that the data does not back costs memory only for
+// the data there is: a 99 KB file used to make Each allocate 3 GiB.
 func TestEachSizeLimit(t *testing.T) {
 	zstd := uattest.Zstd(t)
 	path := uattest.Write(t, zstd, t.TempDir(), "pl.test", "", testMsgs[:2])
 	saved := MaxMessageSize
 	t.Cleanup(func() { MaxMessageSize = saved })
 
-	MaxMessageSize = len(testMsgs[0]) - 1
+	if len(testMsgs[1]) <= len(testMsgs[0]) {
+		t.Fatal("the test needs message 1 longer than message 0")
+	}
+	MaxMessageSize = len(testMsgs[0])
 	p, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = p.Each(zstd, "", func(int, []byte) error { return nil })
+	var got []string
+	err = p.Each(zstd, "", func(i int, msg []byte) error { got = append(got, string(msg)); return nil })
 	p.Close()
-	if err == nil || !strings.Contains(err.Error(), "over the limit") {
-		t.Errorf("over MaxMessageSize: err = %v", err)
+	if err != nil || p.TooBig != 1 || len(got) != 1 || got[0] != testMsgs[0] {
+		t.Errorf("over MaxMessageSize: got %q, TooBig %d, err %v; want message 0, 1, nil", got, p.TooBig, err)
 	}
 
 	MaxMessageSize = saved

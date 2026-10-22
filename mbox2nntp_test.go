@@ -1265,8 +1265,8 @@ func TestReadBodyLimits(t *testing.T) {
 }
 
 // iterateMbox with a dry-run worker: an article over the limit is not
-// sent, the others are, and the input is not marked done. A line over
-// mbox.MaxLineLength stops the reading there, also not done.
+// sent and counts as a 437, the others are sent, and the input is done. A
+// line over mbox.MaxLineLength stops the reading there, not done.
 func TestIterateMboxTooBig(t *testing.T) {
 	setMaxArticleSize(t, 1000)
 	savedLine := mbox.MaxLineLength
@@ -1283,13 +1283,14 @@ func TestIterateMboxTooBig(t *testing.T) {
 		name string
 		big  string
 		sent int
+		e437 int
 		done bool
 	}{
-		{"fits", strings.Repeat("y\n", 400), 3, true},
-		{"too big", strings.Repeat("y\n", 600), 2, false},
-		// over mbox.MaxLineLength, set to 500 below: the parser stops
-		{"long body line", strings.Repeat("y", 600) + "\n", 1, false},
-		{"long header line", "", 1, false},
+		{"fits", strings.Repeat("y\n", 400), 3, 0, true},
+		{"too big", strings.Repeat("y\n", 600), 2, 1, true},
+		// over mbox.MaxLineLength, set to 500 above: the parser stops
+		{"long body line", strings.Repeat("y", 600) + "\n", 1, 0, false},
+		{"long header line", "", 1, 0, false},
 	} {
 		if c.big == "" {
 			c.big = "body\n"
@@ -1312,6 +1313,9 @@ func TestIterateMboxTooBig(t *testing.T) {
 		<-returned
 		if sent := globalCounter.getCounter("sent"); sent != c.sent {
 			t.Errorf("%s: sent %d, want %d", c.name, sent, c.sent)
+		}
+		if e437, total := globalCounter.getCounter("wnntperr437"), globalCounter.getCounter("total"); e437 != c.e437 || total != c.sent+c.e437 {
+			t.Errorf("%s: e437 %d, total %d; want %d, %d", c.name, e437, total, c.e437, c.sent+c.e437)
 		}
 		if done := globalBools.GetGB("done"); done != c.done {
 			t.Errorf("%s: done = %t, want %t", c.name, done, c.done)
