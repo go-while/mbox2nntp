@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- uatexport and ncexport end each article's header with `X-Mbox2nntp-Format: mboxrd`. mbox2nntp then takes one `>` off the quoted `From ` and `#! rnews ` lines and drops the field, so an exported mbox goes to a server unchanged. Archive mboxes without the field are sent as stored, as before.
+- `#! rnews ` lines are quoted after any number of `>`, like `From ` lines. Before, `>#! rnews 5` was written as it was, and could not be told apart from a quoted `#! rnews 5`.
+
 ## v0.3.0 (2026-10-22)
 
 **mbox2nntp**

@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/mboxout"
 	"github.com/go-while/mbox2nntp/uat"
 	"github.com/go-while/mbox2nntp/uat/uattest"
 )
@@ -72,6 +73,7 @@ func TestExportMbox(t *testing.T) {
 			continue
 		}
 		want, _, _ := uat.Fix([]byte(msgs[i]))
+		want = append(want, mboxout.FormatField)
 		if got := m.Headers(); !reflect.DeepEqual(got, want) {
 			t.Errorf("article %d: headers %q\nwant %q", i, got, want)
 		}

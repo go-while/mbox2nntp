@@ -1377,6 +1377,12 @@ func iterateMbox(mboxReader *mbox.MboxStream, src *eofReader, mboxfile string) {
 			log.Printf("[iterateMbox] file='%s' msgNumber=%d msgid='%s': %v, not sent, counted as 437", mboxfile, msgNumber, msgid, berr)
 			continue
 		}
+		if berr == nil && mboxout.IsQuoted(head) {
+			// written by uatexport or ncexport: quoted mboxrd
+			for i, l := range body {
+				body[i] = mboxout.Unquote(l)
+			}
+		}
 		if berr != nil {
 			// the article is incomplete: never send it cut short
 			log.Printf("[iterateMbox] ERROR: file='%s' msgNumber=%d msgid='%s': reading the body: %v, not marking done", mboxfile, msgNumber, msgid, berr)
@@ -1939,8 +1945,8 @@ func rewriteHead(msgid string, head []string) (newhead []string, has_hdr_path bo
 				ignore_nextline = spaced_nextline
 				continue
 			} else
-			// ignore 'Xref' header
-			if header_key_L == "xref" {
+			// ignore 'Xref' header, and our exporters' format field
+			if header_key_L == "xref" || header_key_L == "x-mbox2nntp-format" {
 				if spaced_nextline {
 					ignore_nextline = true
 				}

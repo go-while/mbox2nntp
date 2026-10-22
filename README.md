@@ -181,8 +181,8 @@ indexes. `-gzip` makes an export about 1.7 times slower than a plain one (`-gzip
 times). Reading the `.mbox.gz` with mbox2nntp is as fast as reading the archive.
 
 To feed a server you need no mbox at all: give mbox2nntp the archive. Keep the
-`.usenet.xz`/`.7z` files: they are the toolkit's own data, and an exported mbox is not the
-same, since mbox2nntp does not undo the `>From ` quoting of mboxrd.
+`.usenet.xz`/`.7z` files: they are the toolkit's own data. An exported mbox works as input
+too (see below), but it holds only the articles, re-encoded.
 
 To download a whole collection and export every group, there is
 [`contrib/uat-fetch-export.sh`](contrib/uat-fetch-export.sh) (bash and curl; `ia` or `jq`
@@ -211,11 +211,12 @@ Other programs can read UAT archives with the package `github.com/go-while/mbox2
 (standard library only, plus the zstd program); `uat/uattest` writes small archives for
 their tests.
 
-The mbox is mboxrd (`From ` body lines get a `>`, and so do `#! rnews ` lines, which
-mbox2nntp's parser takes for the start of a message), with a `From nobody DATE` line that
-mbox2nntp's parser reads. The articles get the same changes as above. To send a UAT archive
-to a server, give mbox2nntp the `.usenet` file, not the exported mbox: it does not un-escape
-`>From ` lines. An exported directory works as a `DIR` input.
+The mbox is mboxrd: body lines starting `From ` or `#! rnews ` after any number of `>` get
+one more `>` (mbox2nntp's parser takes both for the start of a message). Each article has a
+`From nobody DATE` line that mbox2nntp's parser reads, and ends its header with
+`X-Mbox2nntp-Format: mboxrd`. The articles get the same changes as above. mbox2nntp reads
+such an mbox back exactly: the field makes it take one `>` off those lines again, and it
+is not sent. An exported directory works as a `DIR` input.
 
 ### NewsCache spools (textusenet-backup)
 
@@ -390,7 +391,9 @@ Articles are sent as stored, apart from these changes to the header:
 Body lines are sent exactly as stored. Every line, header and body, is dot-stuffed for
 the wire (RFC 3977 3.1.1). `>From ` lines are not
 un-escaped: none of the archives measured so far is mbox-escaped, and in all of them a
-`>From ` line is part of the article as posted.
+`>From ` line is part of the article as posted. The exception is an article whose header
+has `X-Mbox2nntp-Format: mboxrd`, as uatexport and ncexport write it: its quoted lines
+lose one `>`, and the field is dropped.
 
 Articles are skipped, not sent, when they have:
 

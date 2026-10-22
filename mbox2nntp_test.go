@@ -22,6 +22,7 @@ import (
 	"time"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/mboxout"
 	"github.com/go-while/mbox2nntp/internal/unpack"
 )
 
@@ -1467,5 +1468,69 @@ func TestIterateMboxAllDropped(t *testing.T) {
 		if done := globalBools.GetGB("done"); done != c.done {
 			t.Errorf("%s: done = %t, want %t", c.name, done, c.done)
 		}
+	}
+}
+
+// collectMbox runs iterateMbox over in and returns the articles it queued.
+// No worker runs: worker_done is set up front, so finishFeeding returns.
+func collectMbox(t *testing.T, in string) []*ArticleItem {
+	t.Helper()
+	mr, err := mbox.CreateMboxStream(strings.NewReader(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	savedMax := MaxWorkers
+	t.Cleanup(func() { MaxWorkers = savedMax })
+	MaxWorkers = 1
+	globalBools.V = make(map[string]bool)
+	globalCounter = GlobalCounter{v: make(map[string]int)}
+	globalCounter.setCounter("worker_done", 1)
+	worker_channel = make(chan *ArticleItem, 100)
+	iterateMbox(mr, &eofReader{r: strings.NewReader(""), sawEOF: true}, t.Name())
+	close(worker_channel)
+	var items []*ArticleItem
+	for it := range worker_channel {
+		items = append(items, it)
+	}
+	return items
+}
+
+// An mbox written by uatexport or ncexport carries mboxout.FormatField:
+// its quoted body lines are unquoted, and the field is not sent. An
+// archive mbox without it is sent as stored, ">From " and all.
+func TestImportExportedMbox(t *testing.T) {
+	body := []string{"From the start", ">From a quote", ">>From deeper", "#! rnews 12", ">#! rnews 5", "> plain quote", "end"}
+	path := filepath.Join(t.TempDir(), "x.mbox")
+	w, err := mboxout.Create(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := []string{"Path: a!b", "From: a@b.c", "Newsgroups: x.test", "Subject: s", "Date: Thu, 8 Dec 2016 12:55:04 +0000", "Message-ID: <rd@test>"}
+	if err := w.Write(head, body); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	items := collectMbox(t, string(data))
+	if len(items) != 1 || !reflect.DeepEqual(items[0].body, body) {
+		t.Fatalf("exported: %d articles, body %q\nwant %q", len(items), items[0].body, body)
+	}
+	newhead, _, code := rewriteHead(items[0].msgid, items[0].head)
+	if code != 0 {
+		t.Fatalf("rewriteHead: code %d", code)
+	}
+	for _, l := range newhead {
+		if strings.HasPrefix(strings.ToLower(l), "x-mbox2nntp-format") {
+			t.Errorf("sent: %q", l)
+		}
+	}
+
+	// an archive mbox: ">From " is the article's own
+	legacy := "From nobody Thu Dec  8 12:55:04 2016\n" + strings.Join(head[:5], "\n") + "\nMessage-ID: <old@test>\n\n>From a quote\nend\n"
+	items = collectMbox(t, legacy)
+	if want := []string{">From a quote", "end"}; len(items) != 1 || !reflect.DeepEqual(items[0].body, want) {
+		t.Errorf("archive mbox: body %q, want %q", items[0].body, want)
 	}
 }

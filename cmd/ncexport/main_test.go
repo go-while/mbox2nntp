@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	mbox "github.com/go-while/go-lib-mbox2nntp"
+	"github.com/go-while/mbox2nntp/internal/mboxout"
 	"github.com/go-while/mbox2nntp/newscache"
 	"github.com/go-while/mbox2nntp/newscache/newscachetest"
 )
@@ -124,7 +125,8 @@ func TestExportTar(t *testing.T) {
 		t.Errorf("stats %+v", st)
 	}
 	heads, bodies := readBack(t, "h.mbox")
-	if want := [][]string{head(cross), head(inline), head(noID)}; !reflect.DeepEqual(heads, want) {
+	f := mboxout.FormatField
+	if want := [][]string{append(head(cross), f), append(head(inline), f), append(head(noID), f)}; !reflect.DeepEqual(heads, want) {
 		t.Errorf("headers %q\nwant %q", heads, want)
 	}
 	// the doubled dot undone, the single one kept, "From " quoted

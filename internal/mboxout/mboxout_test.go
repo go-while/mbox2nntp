@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,7 +42,7 @@ func TestWriter(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := io.ReadAll(zr)
-	want := "From nobody Thu Dec  8 11:55:04 2016\nSubject: x\nDate: Thu, 8 Dec 2016 12:55:04 +0100\n\n>From me\n>>From you\nok\n\n"
+	want := "From nobody Thu Dec  8 11:55:04 2016\nSubject: x\nDate: Thu, 8 Dec 2016 12:55:04 +0100\nX-Mbox2nntp-Format: mboxrd\n\n>From me\n>>From you\nok\n\n"
 	if string(got) != want || zr.Name != "g.mbox" {
 		t.Errorf("got %q (name %q)\nwant %q", got, zr.Name, want)
 	}
@@ -130,7 +131,7 @@ func TestFromDate(t *testing.T) {
 func TestRoundTripSeparatorLines(t *testing.T) {
 	bodies := [][]string{
 		{"A batch starts like this:", "#! rnews 1234", "Path: foo", "", "and so on"},
-		{"From nobody Thu Dec  8 12:55:04 2016", "From MAILER-DAEMON Mon Jan  1", "From 12345678", ">From quoted", "#! rnews x"},
+		{"From nobody Thu Dec  8 12:55:04 2016", "From MAILER-DAEMON Mon Jan  1", "From 12345678", ">From quoted", "#! rnews x", ">#! rnews 5", ">>From x", "> not quoted"},
 		{"last"},
 	}
 	path := filepath.Join(t.TempDir(), "x.mbox")
@@ -182,6 +183,31 @@ func TestRoundTripSeparatorLines(t *testing.T) {
 		want.WriteString("\n") // the blank line before the next "From "
 		if string(b) != want.String() {
 			t.Errorf("article %d: body %q\nwant %q", i, b, want.String())
+		}
+		// Unquote gives back the lines written
+		if !IsQuoted(m.Headers()) {
+			t.Errorf("article %d: no %s", i, FormatField)
+		}
+		lines := strings.Split(strings.TrimSuffix(string(b), "\n\n"), "\n")
+		for j, l := range lines {
+			lines[j] = Unquote(l)
+		}
+		if !slices.Equal(lines, bodies[i]) {
+			t.Errorf("article %d: unquoted %q\nwant %q", i, lines, bodies[i])
+		}
+	}
+}
+
+func TestIsQuoted(t *testing.T) {
+	for head, want := range map[string]bool{
+		FormatField:                           true,
+		"x-mbox2nntp-format:  MBOXRD ":        true,
+		"X-Mbox2nntp-Format: mboxo":           false,
+		"Subject: X-Mbox2nntp-Format: mboxrd": false,
+		"X-Mbox2nntp-Format mboxrd":           false,
+	} {
+		if got := IsQuoted([]string{"Subject: s", head}); got != want {
+			t.Errorf("%q: %t, want %t", head, got, want)
 		}
 	}
 }

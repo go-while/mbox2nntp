@@ -173,16 +173,34 @@ func Create(path string, level int) (*Writer, error) {
 	return m, nil
 }
 
-// Write adds one article: a "From nobody DATE" line, the header lines, a
-// blank line, the body lines with NeedsQuote lines quoted, and a blank
-// line.
+// FormatField ends the header of every article Writer writes. It tells
+// mbox2nntp that the body is quoted (see NeedsQuote), so that it unquotes
+// it, and drops the field before sending. Old archive mboxes are not
+// quoted: in them a ">From " line is part of the article as posted.
+const FormatField = "X-Mbox2nntp-Format: mboxrd"
+
+// IsQuoted reports whether head holds FormatField.
+func IsQuoted(head []string) bool {
+	for _, l := range head {
+		if name, value, ok := strings.Cut(l, ":"); ok &&
+			strings.EqualFold(strings.TrimSpace(name), "X-Mbox2nntp-Format") &&
+			strings.EqualFold(strings.TrimSpace(value), "mboxrd") {
+			return true
+		}
+	}
+	return false
+}
+
+// Write adds one article: a "From nobody DATE" line, the header lines and
+// FormatField, a blank line, the body lines with NeedsQuote lines quoted,
+// and a blank line.
 func (m *Writer) Write(head, body []string) error {
 	fmt.Fprintf(m.w, "From nobody %s\n", FromDate(head))
 	for _, l := range head {
 		m.w.WriteString(l)
 		m.w.WriteByte('\n')
 	}
-	m.w.WriteByte('\n')
+	m.w.WriteString(FormatField + "\n\n")
 	for _, l := range body {
 		if NeedsQuote(l) {
 			m.w.WriteByte('>')
@@ -224,8 +242,21 @@ func (m *Writer) Abort() {
 // go-lib-mbox2nntp, mbox2nntp's mbox parser, also takes "#! rnews N" for
 // the start of a message (rnews batches), so such a line in a body would
 // split the article there; ">#! rnews N" is body text to it.
+//
+// "#! rnews " is quoted after any number of ">" too, so that Unquote can
+// undo every quote: ">#! rnews N" used to be written as it was, and
+// would have lost its ">".
 func NeedsQuote(l string) bool {
-	return strings.HasPrefix(strings.TrimLeft(l, ">"), "From ") || strings.HasPrefix(l, "#! rnews ")
+	t := strings.TrimLeft(l, ">")
+	return strings.HasPrefix(t, "From ") || strings.HasPrefix(t, "#! rnews ")
+}
+
+// Unquote undoes the quote Write adds to a body line.
+func Unquote(l string) string {
+	if strings.HasPrefix(l, ">") && NeedsQuote(l[1:]) {
+		return l[1:]
+	}
+	return l
 }
 
 // FromDate is the date on the "From " line: the article's Date in UTC, in
