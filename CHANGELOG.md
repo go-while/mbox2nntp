@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 (2026-10-22)
 
 **mbox2nntp**
 - New counters `dropped` and `binary` in the summary and the per-file line:
