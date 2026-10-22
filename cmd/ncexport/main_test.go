@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"unsafe"
@@ -422,5 +423,96 @@ func TestTmpdirCheckedFirst(t *testing.T) {
 	_, err := export("-", in, options{out: filepath.Join(dir, "h.mbox"), tmpdir: filepath.Join(dir, "no-such-dir")})
 	if err == nil || !strings.Contains(err.Error(), "-tmpdir") || read {
 		t.Errorf("err = %v, input read: %t", err, read)
+	}
+}
+
+// -split writes one mbox per group into a directory. A group met again
+// later in the tarball is appended to: here both groups are interleaved,
+// so each file holds two runs (two gzip members with -gzip).
+func TestSplit(t *testing.T) {
+	files := spool()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, name := range []string{"h/one/.art1", "h/two/.art7", "h/one/.db", "h/two/.art8"} {
+		tw.WriteHeader(&tar.Header{Name: name, Mode: 0644, Size: int64(len(files[name]))})
+		tw.Write(files[name])
+	}
+	tw.Close()
+	for _, level := range []int{0, 6} {
+		dir := t.TempDir()
+		in := filepath.Join(dir, "h.tar")
+		if err := os.WriteFile(in, buf.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(dir)
+		st, err := export(in, nil, options{dedup: true, split: true, gzip: level})
+		if err != nil || st.out != "h" || st.n != 3 || st.dups != 1 || st.groupFiles != 2 {
+			t.Fatalf("level %d: %+v, %v", level, st, err)
+		}
+		if s := st.summary(in); !strings.Contains(s, "3 articles to h/ (2 group files)") {
+			t.Errorf("summary: %s", s)
+		}
+		ext := ".mbox"
+		if level != 0 {
+			ext += ".gz"
+		}
+		entries, _ := os.ReadDir("h")
+		if len(entries) != 2 || entries[0].Name() != "h.one"+ext || entries[1].Name() != "h.two"+ext {
+			t.Fatalf("level %d: %v", level, entries)
+		}
+		// h.one: .art1 (cross), then the .db's inline article; h.two: .art7
+		// is the crossposted copy, skipped, then .art8
+		for name, want := range map[string][]string{"h.one": {"cross", "inline"}, "h.two": {"no id"}} {
+			heads, _ := readBack(t, filepath.Join("h", name+ext))
+			var subjects []string
+			for _, h := range heads {
+				for _, l := range h {
+					if v, ok := strings.CutPrefix(l, "Subject: "); ok {
+						subjects = append(subjects, v)
+					}
+				}
+			}
+			if !slices.Equal(subjects, want) {
+				t.Errorf("level %d: %s: %q, want %q", level, name, subjects, want)
+			}
+		}
+		if left, _ := filepath.Glob(".h.*.tmp"); len(left) != 0 {
+			t.Errorf("temporary directory left: %v", left)
+		}
+		// the directory exists now: not replaced
+		if _, err := export(in, nil, options{split: true, gzip: level}); err == nil {
+			t.Error("existing directory: no error")
+		}
+	}
+}
+
+// A failed -split export leaves neither the directory nor its temporary.
+func TestSplitFailed(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	data := tarball(t, false)
+	if _, err := export("-", bytes.NewReader(data[:len(data)/2]), options{out: "h", split: true}); err == nil {
+		t.Fatal("truncated tarball: no error")
+	}
+	if left, _ := os.ReadDir("."); len(left) != 0 {
+		t.Errorf("left behind: %v", left)
+	}
+}
+
+func TestGroupFile(t *testing.T) {
+	for group, want := range map[string]string{
+		"rec.arts.movies":   "rec.arts.movies",
+		"alt.fan.c++":       "alt.fan.c++",
+		"de.comp.os.unix-x": "de.comp.os.unix-x",
+		"a b/c\\d:e":        "a_b_c_d_e",
+		"":                  "no-group",
+		"con.foo":           "_con.foo",
+		"aux":               "_aux",
+		"contest.x":         "contest.x",
+		"grüße":             "gr____e",
+	} {
+		if got := groupFile(group); got != want {
+			t.Errorf("groupFile(%q) = %q, want %q", group, got, want)
+		}
 	}
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- ncexport `-split`: one mbox per group, `GROUP.mbox` or `GROUP.mbox.gz`, in a directory built under a temporary name and renamed when complete. A group the tarball holds in several places is appended to.
+
 ## v0.3.1 (2026-10-22)
 
 - go-lib-mbox2nntp `73e35b8`: the parser also takes the separator line most mbox writers use (RFC 4155), `From user@example.com Thu Dec  8 12:55:04 2016`, as a whole line in exactly that form, with a year of 1 to 4 digits. Mboxes from mutt, Thunderbird, Python's `mailbox` and usenet_archiver were not read at all before, or were merged into the message before. On the archive.org corpus (5.28 million messages) no message changes.

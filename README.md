@@ -233,6 +233,7 @@ curl -sL https://archive.org/download/textusenet-backup_9/97comp.tar.gz |
     ncexport -gzip -o 97comp.mbox.gz -                  # straight from the download
 ncexport -o comp.mbox /var/spool/newscache/comp         # an unpacked spool directory
 ncexport -gzip -max-db 64G -tmpdir /big/tmp r.tar.gz    # .db files up to 64 GiB
+ncexport -gzip -split sci.tar.gz                        # one mbox per group: sci/sci.math.mbox.gz, ...
 ```
 
 A tarball is read as a stream in one pass, and it can come from a pipe. Nothing is
@@ -253,7 +254,15 @@ an existing one is never replaced.
   ncexport writes it once, the first time its Message-ID turns up; `-dedup=false` writes
   every copy.
 - **Order.** A tarball's articles are written in the tarball's order, a directory's group by
-  group and by article number. The mbox is mboxrd, with `From nobody DATE` taken from the
+  group and by article number.
+- **One mbox per group: `-split`.** The output is a directory (`NAME/`, or `-o DIR`) holding
+  `GROUP.mbox` or `GROUP.mbox.gz` per group, built under a temporary name and renamed when
+  complete, like the single mbox. Only one group file is open at a time. A group the
+  tarball holds in several places is appended to, gzipped as one more gzip member, which
+  gzip readers (mbox2nntp's, `zcat`) read as one stream. With `-dedup`, a crossposted
+  article goes to the first of its groups only; its `Newsgroups:` header still names all of
+  them, so a server files it in each. In a file name, characters other than letters,
+  digits and `._+-` become `_`. The mbox is mboxrd, with `From nobody DATE` taken from the
   Date header, as uatexport writes it.
 - **The summary.** It counts the groups, the `.art` files and the articles inside `.db`
   files. It also counts the crossposted copies skipped, and the articles a `.db` lists

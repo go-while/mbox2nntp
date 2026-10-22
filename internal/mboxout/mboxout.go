@@ -141,10 +141,35 @@ func Commit(tmp, path string) error {
 
 // Writer writes mboxrd to a new file, gzipped when the level is not 0.
 type Writer struct {
-	path string
-	f    *os.File
-	gz   *gzip.Writer
-	w    *bufio.Writer
+	path      string
+	f         *os.File
+	gz        *gzip.Writer
+	w         *bufio.Writer
+	appending bool // Append: no temporary name, nothing to commit
+}
+
+// Append adds to the mbox at path, creating it when missing, without a
+// temporary name: for files inside a directory that is itself temporary
+// until complete. Gzipped, each Append adds a gzip member, which gzip
+// readers (Go's, zcat) read on as one stream.
+func Append(path string, level int) (*Writer, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+	if err != nil {
+		return nil, err
+	}
+	AddTempFile(f) // closed before its directory is removed on a signal
+	m := &Writer{path: path, f: f, appending: true}
+	var w io.Writer = f
+	if level != 0 {
+		if m.gz, err = gzip.NewWriterLevel(f, level); err != nil {
+			m.Abort()
+			return nil, err
+		}
+		m.gz.Name = strings.TrimSuffix(filepath.Base(path), ".gz")
+		w = m.gz
+	}
+	m.w = bufio.NewWriterSize(w, 1<<20)
+	return m, nil
 }
 
 // Create starts the mbox at path, under a temporary name until Close.
@@ -221,6 +246,12 @@ func (m *Writer) Close() error {
 	if cerr := m.f.Close(); err == nil {
 		err = cerr
 	}
+	if m.appending {
+		tempMu.Lock()
+		delete(temps, m.f.Name())
+		tempMu.Unlock()
+		return err
+	}
 	if err == nil {
 		err = os.Chmod(m.f.Name(), 0644) // os.CreateTemp makes it 0600
 	}
@@ -231,9 +262,16 @@ func (m *Writer) Close() error {
 	return Commit(m.f.Name(), m.path)
 }
 
-// Abort removes the unfinished file.
+// Abort removes the unfinished file; an Append file is only closed, as it
+// goes with its directory.
 func (m *Writer) Abort() {
 	m.f.Close()
+	if m.appending {
+		tempMu.Lock()
+		delete(temps, m.f.Name())
+		tempMu.Unlock()
+		return
+	}
 	RemoveTemp(m.f.Name())
 }
 
