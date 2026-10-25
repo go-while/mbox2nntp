@@ -718,8 +718,17 @@ func needGNUFindSort(t *testing.T) {
 	if _, err := exec.LookPath("find"); err != nil {
 		t.Skip("find not installed")
 	}
-	if out, err := exec.Command("sort", "--version").Output(); err != nil || !strings.Contains(string(out), "GNU coreutils") {
+	out, err := exec.Command("sort", "--version").Output()
+	if err != nil || !strings.Contains(string(out), "GNU coreutils") {
 		t.Skip("sort is not GNU coreutils sort")
+	}
+	// coreutils 9.0 changed sort -V (filevercmp); walkFiles follows 9.x.
+	// EL9 and openSUSE Leap 15.6 ship 8.32.
+	first, _, _ := strings.Cut(string(out), "\n")
+	if f := strings.Fields(first); len(f) > 0 {
+		if major, _, _ := strings.Cut(f[len(f)-1], "."); major < "9" && len(major) == 1 {
+			t.Skipf("%s: sort -V before coreutils 9.0 orders differently", first)
+		}
 	}
 }
 

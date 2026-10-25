@@ -485,7 +485,9 @@ func TestWatchdogSlowServer(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	c := &client{http: srv.Client(), stall: 300 * time.Millisecond}
+	// far above the 100ms gaps: a loaded machine under -race once took
+	// over 300ms for one
+	c := &client{http: srv.Client(), stall: 2 * time.Second}
 	resp, err := c.get(context.Background(), srv.URL, nil)
 	if err != nil {
 		t.Fatal(err)
