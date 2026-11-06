@@ -9,12 +9,16 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -30,6 +34,7 @@ type iaMeta struct {
 	Files  []iaFile
 	Dark   bool
 	Exists bool
+	Nodes  []string // the item's directory on each data node, as URLs; see mirrors
 }
 
 // generated are suffixes of the files archive.org makes itself for every
@@ -58,6 +63,18 @@ type permanentError struct{ error }
 
 func (e permanentError) Unwrap() error { return e.error }
 
+// statusError is an HTTP response with a status get does not accept.
+type statusError struct {
+	url    string
+	status string
+	code   int
+}
+
+func (e statusError) Error() string { return e.url + ": " + e.status }
+
+// errNoRange: the server sent the whole file when asked for a piece.
+var errNoRange = errors.New("the server ignores Range requests")
+
 type client struct {
 	http    *http.Client
 	base    string // https://archive.org
@@ -66,6 +83,10 @@ type client struct {
 	backoff time.Duration // first pause between tries; doubles, up to 64x
 	stall   time.Duration // see get; 0 for none
 	read    atomic.Int64  // bytes downloaded, for the progress line
+	nodes   bool          // download from the data nodes (iaMeta.Nodes)
+	piece   int64         // fetch files larger than this in pieces of this size; 0 never
+	conns   chan struct{} // one token per request in flight, files and pieces alike
+	db      *db           // records the finished pieces
 }
 
 // retry runs f until it succeeds, fails permanently, the context ends or
@@ -130,11 +151,113 @@ func (c *client) get(ctx context.Context, u string, hdr map[string]string) (*htt
 	}
 	w.stop()
 	resp.Body.Close()
-	err = fmt.Errorf("%s: %s", u, resp.Status)
+	err = statusError{u, resp.Status, resp.StatusCode}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return nil, err
 	}
 	return nil, permanentError{err}
+}
+
+// mirrors are the URLs one file can be had from: the item's directory on
+// each of its data nodes, in random order, and archive.org's /download/
+// address, which only redirects to one of them. With many downloads at
+// once the redirects are what limits the rate, so the nodes are asked
+// directly, and /download/ only once each node has failed once, or when
+// none is left. A node that answers 4xx is dropped.
+type mirrors struct {
+	mu       sync.Mutex
+	nodes    []string
+	front    string
+	next     int
+	failures int
+}
+
+func newMirrors(base, id, name string, nodes []string) *mirrors {
+	p := escapePath(name)
+	m := &mirrors{front: base + "/download/" + url.PathEscape(id) + "/" + p}
+	for _, n := range nodes {
+		m.nodes = append(m.nodes, n+"/"+p)
+	}
+	rand.Shuffle(len(m.nodes), func(i, j int) { m.nodes[i], m.nodes[j] = m.nodes[j], m.nodes[i] })
+	return m
+}
+
+// pick returns the URL to ask next; the calls go round the nodes.
+func (m *mirrors) pick() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := len(m.nodes)
+	if n > 0 && m.failures >= n {
+		n++ // the front door joins the round
+	}
+	if n == 0 {
+		return m.front
+	}
+	i := m.next % n
+	m.next++
+	if i == len(m.nodes) {
+		return m.front
+	}
+	return m.nodes[i]
+}
+
+func (m *mirrors) fail() {
+	m.mu.Lock()
+	m.failures++
+	m.mu.Unlock()
+}
+
+// drop takes a node out after a 4xx; it reports false for the front door.
+func (m *mirrors) drop(u string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, n := range m.nodes {
+		if n == u {
+			m.nodes = slices.Delete(m.nodes, i, i+1)
+			return true
+		}
+	}
+	return false
+}
+
+// fetch is get from the next of m's URLs. A node that answers 4xx is
+// dropped, and the error made one to retry: the next try asks another.
+func (c *client) fetch(ctx context.Context, m *mirrors, hdr map[string]string) (*http.Response, string, error) {
+	u := m.pick()
+	resp, err := c.get(ctx, u, hdr)
+	if err == nil {
+		return resp, u, nil
+	}
+	var se statusError
+	if errors.As(err, &se) && se.code < 500 && se.code != http.StatusTooManyRequests && m.drop(u) {
+		return nil, u, fmt.Errorf("%v; trying another server", se)
+	}
+	if ctx.Err() == nil {
+		m.fail()
+	}
+	return nil, u, err
+}
+
+// nodeURLs makes the URLs of an item's directory on its data nodes, with
+// the scheme of base. Odd host names or directories are left out.
+func nodeURLs(base, dir string, hosts []string) []string {
+	b, err := url.Parse(base)
+	if err != nil || dir == "" || !strings.HasPrefix(dir, "/") || path.Clean(dir) != dir {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, h := range hosts {
+		if h == "" || seen[h] || strings.ContainsAny(h, "/\\@?#") {
+			continue
+		}
+		seen[h] = true
+		if u, err := url.Parse("//" + h); err != nil || u.Host != h {
+			continue
+		}
+		out = append(out, b.Scheme+"://"+h+escapePath(dir))
+	}
+	return out
 }
 
 // watchdog is the body of a response from get, and cancels its request
@@ -193,11 +316,22 @@ func (c *client) metadata(ctx context.Context, id string) (iaMeta, error) {
 			Dark     bool            `json:"is_dark"`
 			Metadata json.RawMessage `json:"metadata"`
 			Created  int64           `json:"created"`
+			Dir      string          `json:"dir"`
+			Servers  []string        `json:"workable_servers"`
+			D1       string          `json:"d1"`
+			D2       string          `json:"d2"`
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 			return fmt.Errorf("metadata %s: %w", id, err)
 		}
 		m = iaMeta{Dark: raw.Dark, Exists: raw.Created != 0 || len(raw.Metadata) > 0 || len(raw.Files) > 0}
+		if c.nodes {
+			hosts := raw.Servers
+			if len(hosts) == 0 {
+				hosts = []string{raw.D1, raw.D2}
+			}
+			m.Nodes = nodeURLs(c.base, raw.Dir, hosts)
+		}
 		for _, f := range raw.Files {
 			if f.Source != "original" || isGenerated(f.Name) {
 				continue
@@ -255,8 +389,9 @@ func check(f iaFile, n int64, h hash.Hash) error {
 
 // download fetches a file of an item to path, through part (see partName),
 // which a later run resumes. The file appears under its name only when its
-// size and md5 match the metadata.
-func (c *client) download(ctx context.Context, id string, f iaFile, path, part string) error {
+// size and md5 match the metadata. nodes are the item's directories on its
+// data nodes (iaMeta.Nodes).
+func (c *client) download(ctx context.Context, id string, f iaFile, nodes []string, path, part string) error {
 	if _, err := os.Stat(path); err == nil {
 		// Left by an earlier run that stopped before recording it, or put
 		// there by hand: keep it if it is the right file.
@@ -268,12 +403,182 @@ func (c *client) download(ctx context.Context, id string, f iaFile, path, part s
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return permanentError{err}
 	}
-	u := c.base + "/download/" + url.PathEscape(id) + "/" + escapePath(f.Name)
-	err := c.retry(ctx, id+"/"+f.Name, func() error { return c.fetchPart(ctx, u, part, f) })
+	m := newMirrors(c.base, id, f.Name, nodes)
+	split := c.piece > 0 && f.Size > c.piece && c.db != nil
+	err := c.retry(ctx, id+"/"+f.Name, func() error {
+		if split {
+			err := c.fetchSplit(ctx, id, f, m, part)
+			if errors.Is(err, errNoRange) {
+				split = false
+				return fmt.Errorf("%w; downloading it in one go", err)
+			}
+			return err
+		}
+		if !c.acquire(ctx) {
+			return ctx.Err()
+		}
+		defer c.release()
+		return c.fetchPart(ctx, m, part, f)
+	})
 	if err != nil {
 		return err
 	}
 	return os.Rename(part, path)
+}
+
+// acquire takes a connection token; false when the context ended first.
+func (c *client) acquire(ctx context.Context) bool {
+	if c.conns == nil {
+		return true
+	}
+	select {
+	case c.conns <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (c *client) release() {
+	if c.conns != nil {
+		<-c.conns
+	}
+}
+
+// fetchSplit downloads a file of more than c.piece bytes in pieces of that
+// size, as many at a time as there are connection tokens, each written to
+// its place in part. A finished piece is recorded in the database, so the
+// next try, or the next run, fetches only the pieces still missing. When
+// all are there the whole part is checked against the size and md5 of the
+// metadata.
+//
+// A part with no pieces recorded comes from a download from the start (an
+// earlier version, or -piece 0): its whole pieces count as done.
+func (c *client) fetchSplit(ctx context.Context, id string, f iaFile, m *mirrors, part string) error {
+	fh, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
+	if err != nil {
+		return permanentError{err}
+	}
+	defer fh.Close()
+	n := int((f.Size + c.piece - 1) / c.piece)
+	end := func(i int) int64 { return min(int64(i+1)*c.piece, f.Size) }
+	done, err := c.db.pieces(id, f.Name, c.piece)
+	if err != nil {
+		return permanentError{err}
+	}
+	if len(done) == 0 {
+		fi, err := fh.Stat()
+		if err != nil {
+			return permanentError{err}
+		}
+		have := fi.Size()
+		if have > f.Size {
+			have = 0
+		}
+		var whole []int
+		for i := 0; i < n && end(i) <= have; i++ {
+			whole = append(whole, i)
+			done[i] = true
+		}
+		if err := c.db.piecesDone(id, f.Name, c.piece, whole); err != nil {
+			return permanentError{err}
+		}
+	}
+	if err := fh.Truncate(f.Size); err != nil {
+		return permanentError{err}
+	}
+
+	pctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	var wg sync.WaitGroup
+	var first firstErr
+	for i := 0; i < n && pctx.Err() == nil; i++ {
+		if done[i] {
+			continue
+		}
+		if !c.acquire(pctx) {
+			break
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer c.release()
+			start := int64(i) * c.piece
+			err := c.fetchPiece(pctx, m, fh, start, end(i)-1)
+			if err == nil {
+				if err = c.db.piecesDone(id, f.Name, c.piece, []int{i}); err != nil {
+					err = permanentError{err}
+				}
+			}
+			if err != nil && pctx.Err() == nil {
+				first.set(err)
+				// The other pieces go on, so the next try has less to do,
+				// unless trying again is useless.
+				var pe permanentError
+				if errors.Is(err, errNoRange) || errors.As(err, &pe) {
+					cancel()
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	if err := first.get(); err != nil {
+		if errors.Is(err, errNoRange) {
+			c.db.clearPieces(id, f.Name)
+			fh.Truncate(0)
+		}
+		return err
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if _, err := fh.Seek(0, io.SeekStart); err != nil {
+		return permanentError{err}
+	}
+	h := md5.New()
+	got, err := io.Copy(h, fh)
+	if err != nil {
+		return err
+	}
+	if err := check(f, got, h); err != nil {
+		c.db.clearPieces(id, f.Name)
+		fh.Truncate(0)
+		return fmt.Errorf("%s: %v; starting over", part, err)
+	}
+	if err := fh.Sync(); err != nil {
+		return err
+	}
+	if err := c.db.clearPieces(id, f.Name); err != nil {
+		return permanentError{err}
+	}
+	return nil
+}
+
+// fetchPiece downloads bytes start to end (inclusive) of a file into fh.
+func (c *client) fetchPiece(ctx context.Context, m *mirrors, fh *os.File, start, end int64) error {
+	resp, u, err := c.fetch(ctx, m, map[string]string{"Range": fmt.Sprintf("bytes=%d-%d", start, end)})
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+	case http.StatusOK:
+		return fmt.Errorf("%s: %w", u, errNoRange)
+	default:
+		return fmt.Errorf("%s: %s for bytes %d-%d", u, resp.Status, start, end)
+	}
+	if cr := resp.Header.Get("Content-Range"); !strings.HasPrefix(cr, fmt.Sprintf("bytes %d-%d/", start, end)) {
+		return fmt.Errorf("%s: Content-Range %q for bytes %d-%d", u, cr, start, end)
+	}
+	n, err := io.Copy(io.NewOffsetWriter(fh, start), &counter{r: resp.Body, n: &c.read})
+	if err != nil {
+		return err
+	}
+	if want := end - start + 1; n != want {
+		return fmt.Errorf("%s: %d bytes for bytes %d-%d", u, n, start, end)
+	}
+	return nil
 }
 
 // partName is the file path is downloaded through: path.part, unless that
@@ -300,7 +605,7 @@ func escapePath(name string) string {
 // fetchPart downloads into part, continuing what is there, and checks the
 // result. A part that turns out wrong is removed, so the next try starts
 // over.
-func (c *client) fetchPart(ctx context.Context, u, part string, f iaFile) error {
+func (c *client) fetchPart(ctx context.Context, m *mirrors, part string, f iaFile) error {
 	fh, err := os.OpenFile(part, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
 		return permanentError{err}
@@ -327,7 +632,7 @@ func (c *client) fetchPart(ctx context.Context, u, part string, f iaFile) error 
 	if have > 0 {
 		hdr = map[string]string{"Range": fmt.Sprintf("bytes=%d-", have)}
 	}
-	resp, err := c.get(ctx, u, hdr)
+	resp, u, err := c.fetch(ctx, m, hdr)
 	if err != nil {
 		return err
 	}

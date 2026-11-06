@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS files (
 	done_at    TEXT NOT NULL,
 	PRIMARY KEY (identifier, name)
 );
+CREATE TABLE IF NOT EXISTS pieces (
+	identifier TEXT NOT NULL,
+	name       TEXT NOT NULL,
+	piece_size INTEGER NOT NULL,
+	piece      INTEGER NOT NULL,
+	PRIMARY KEY (identifier, name, piece_size, piece)
+);
 `
 
 type db struct{ *sql.DB }
@@ -107,6 +114,49 @@ func (d *db) doneFiles(id string) (map[string]bool, error) {
 func (d *db) fileDone(id string, f iaFile, path string) error {
 	_, err := d.Exec(`INSERT OR REPLACE INTO files (identifier, name, size, md5, path, done_at)
 		VALUES (?, ?, ?, ?, ?, ?)`, id, f.Name, f.Size, f.MD5, path, now())
+	return err
+}
+
+// pieces returns the finished pieces of a file being downloaded in pieces
+// of size bytes (see client.fetchSplit). Pieces of another size do not
+// count.
+func (d *db) pieces(id, name string, size int64) (map[int]bool, error) {
+	rows, err := d.Query(`SELECT piece FROM pieces WHERE identifier = ? AND name = ? AND piece_size = ?`, id, name, size)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	m := map[int]bool{}
+	for rows.Next() {
+		var i int
+		if err := rows.Scan(&i); err != nil {
+			return nil, err
+		}
+		m[i] = true
+	}
+	return m, rows.Err()
+}
+
+func (d *db) piecesDone(id, name string, size int64, pieces []int) error {
+	if len(pieces) == 0 {
+		return nil
+	}
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, i := range pieces {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO pieces (identifier, name, piece_size, piece) VALUES (?, ?, ?, ?)`,
+			id, name, size, i); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (d *db) clearPieces(id, name string) error {
+	_, err := d.Exec(`DELETE FROM pieces WHERE identifier = ? AND name = ?`, id, name)
 	return err
 }
 

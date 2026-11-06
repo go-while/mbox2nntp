@@ -315,6 +315,7 @@ go -C cmd/iafetch build -o ../../iafetch .
 iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
 iafetch -tier A archive.org/import-order.csv            # the early era first
 iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
+iafetch -j 128 -conns 384 -o /data/ia archive.org/import-order.csv   # a whole 1 Gbit/s line
 iafetch -status -db /data/iafetch.sqlite                # what the database records
 ```
 
@@ -325,18 +326,32 @@ iafetch -status -db /data/iafetch.sqlite                # what the database reco
   `-match`, `-from`, `-to` and `-limit` choose the items. Tier `X` (not Usenet) is left out
   unless `-tier` names it.
 - **Order and parallelism.** Items are taken by the list's `order` column; their files go to
-  `-j` workers (default 4), so a big item's files download side by side and the next item
-  starts as soon as a worker is free.
+  `-j` workers (default 16), so a big item's files download side by side and the next item
+  starts as soon as a worker is free. The metadata of up to `-meta` items (default 8) is
+  fetched ahead meanwhile; the items are still queued in order.
+- **Speed.** archive.org gives one connection well under 1 MB/s, so a fast line needs a few
+  hundred at once. `-conns` (default 64) caps the requests in flight, files and pieces
+  together. A file larger than `-piece` MB (default 32; `0` for never) is fetched in pieces
+  of that size, side by side, each written to its place in the `.part` file.
+  Files come straight from the data nodes the item's metadata names (`workable_servers`,
+  `dir`): `archive.org/download/` only redirects there, and with many downloads at once
+  those redirects are what limits the rate. `/download/` is asked when a node does not
+  have the file, or once each node has failed; `-nodes=false` always goes through it.
+  Measured on a 1 Gbit/s line: about 50 MB/s through `/download/`, about 113 MB/s from the
+  nodes with 128 files and 384 connections.
 - **Checking.** A file is written to `FILE.part` and renamed to `FILE` only when its size
   and md5 match the metadata. A stopped run (Ctrl-C) leaves `.part` files, which the next
-  run resumes with a range request. Failed requests, including the 500s archive.org
+  run resumes with a range request; for a file fetched in pieces, the finished pieces are
+  recorded in the database and only the missing ones are fetched. Failed requests, including the 500s archive.org
   sometimes answers, are retried with a pause of 5 s doubling up to 5m20s (`-retries`). So
   is a request that gets no data for 2 minutes (`-stall`), resuming the part. A
   file that already exists under its name is checked by md5 and kept if right; a different
   file there is an error and is never replaced.
 - **The database** (`-db`, default `./iafetch.sqlite`) has a table `items` (identifier,
-  order, tier, list, status, files, bytes, note) and a table `files` (identifier, name,
-  size, md5, path, time). An item is `done`, `incomplete` (a file failed: the next run gets
+  order, tier, list, status, files, bytes, note), a table `files` (identifier, name,
+  size, md5, path, time) and a table `pieces` (identifier, name, piece size, piece) for files
+  being fetched in pieces, emptied when each is done. `path` is as given by `-o`: give an
+  absolute `-o` when other programs read the database. An item is `done`, `incomplete` (a file failed: the next run gets
   what is missing), `dark` (taken down on archive.org), `missing` (no such item) or `empty`
   (no files to download). `dark`, `missing` and `empty` items are skipped until
   `-retry-unavailable`. To fetch an item again, delete its rows:

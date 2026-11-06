@@ -49,6 +49,14 @@ versions archive.org keeps under history/; -include and
 from there after an interruption, and renamed to FILE when its size and md5
 match the metadata. Failed requests are retried with a growing pause.
 
+Files come straight from the data nodes the metadata names, archive.org's
+/download/ only when a node lacks a file or each has failed (-nodes).
+Files larger than -piece MB are fetched in pieces of that size side by
+side; the database records the finished pieces, so a stopped download
+resumes with the missing ones. -conns caps the requests in flight, files
+and pieces together; archive.org gives one connection well under 1 MB/s,
+so a fast line needs hundreds (-j 128 -conns 384 fills 1 Gbit/s).
+
 The database (-db) records each downloaded file and the state of each item:
   done        every file downloaded and verified; skipped from then on,
               whether or not its files are still in DIR
@@ -77,6 +85,9 @@ type options struct {
 	base             string
 	backoff          time.Duration
 	stall            time.Duration
+	conns, meta      int   // requests at once; metadata requests ahead
+	piece            int64 // bytes; 0 never splits
+	nodes            bool  // ask the data nodes directly
 }
 
 func main() {
@@ -96,7 +107,11 @@ func parseFlags(args []string) (options, string) {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&o.out, "o", "ia-download", "download to `DIR`/ITEM/FILE")
 	fs.StringVar(&o.dbPath, "db", "iafetch.sqlite", "SQLite database `PATH` that records what was downloaded")
-	fs.IntVar(&o.jobs, "j", 4, "download `N` files at a time")
+	fs.IntVar(&o.jobs, "j", 16, "download `N` files at a time")
+	fs.IntVar(&o.conns, "conns", 64, "at most `N` downloads at once, files and pieces of big files together")
+	pieceMB := fs.Int("piece", 32, "fetch files larger than `MB` megabytes in pieces of that size, in parallel; 0 for never")
+	fs.IntVar(&o.meta, "meta", 8, "fetch the metadata of up to `N` items ahead")
+	fs.BoolVar(&o.nodes, "nodes", true, "download from the item's data nodes, as the metadata names them, instead of through archive.org/download/")
 	fs.IntVar(&o.retries, "retries", 8, "retry a failed request `N` times, waiting 5s, 10s, 20s ... up to 5m20s")
 	fs.StringVar(&tiers, "tier", "A,B0,B1,B2,B3,B4,C", "only items of these `TIERS`, comma-separated; empty for all")
 	fs.StringVar(&lists, "list", "", "only items of these `LISTS` (the \"list\" column), comma-separated")
@@ -121,10 +136,11 @@ func parseFlags(args []string) (options, string) {
 		fmt.Println(versionString("iafetch"))
 		os.Exit(0)
 	}
-	if (fs.NArg() != 1 && !o.status) || fs.NArg() > 1 || o.jobs < 1 {
+	if (fs.NArg() != 1 && !o.status) || fs.NArg() > 1 || o.jobs < 1 || o.conns < 1 || o.meta < 1 || *pieceMB < 0 {
 		fs.Usage()
 		os.Exit(2)
 	}
+	o.piece = int64(*pieceMB) << 20
 	o.tiers, o.lists = set(tiers), set(lists)
 	for _, r := range []struct {
 		s string
@@ -239,6 +255,7 @@ func (o options) wantFile(name string) bool {
 type job struct {
 	run        *itemRun
 	file       iaFile
+	nodes      []string
 	path, part string
 }
 
@@ -288,10 +305,15 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 		return fmt.Errorf("%s: %w", csvPath, err)
 	}
 
+	conns := o.conns
+	if conns < 1 { // not set (tests): one per worker
+		conns = o.jobs
+	}
 	// DefaultTransport's dial, TLS handshake and idle timeouts; the stall
 	// watchdog (client.get) covers the rest
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.MaxIdleConnsPerHost = o.jobs + 1
+	tr.MaxIdleConns = 0 // no limit; per host as below
+	tr.MaxIdleConnsPerHost = conns + o.meta + 1
 	tr.ResponseHeaderTimeout = 2 * time.Minute
 	c := &client{
 		http:    &http.Client{Transport: tr},
@@ -300,6 +322,10 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 		retries: o.retries,
 		backoff: o.backoff,
 		stall:   o.stall,
+		nodes:   o.nodes,
+		piece:   o.piece,
+		conns:   make(chan struct{}, conns),
+		db:      d,
 	}
 	var st stats
 	jobs := make(chan job, o.jobs)
@@ -317,8 +343,47 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 		}()
 	}
 	if o.progress > 0 && !o.dryRun {
-		go progress(ctx, o.progress, c, &st, o.jobs)
+		go progress(ctx, o.progress, c, &st, o.jobs, conns)
 	}
+
+	// The metadata of the next items is fetched while the files of the
+	// earlier ones download, up to o.meta items ahead; the items are still
+	// queued in order. One request at a time left the workers idle on
+	// items of many small files.
+	type ahead struct {
+		it   item
+		m    iaMeta
+		err  error
+		done chan struct{}
+	}
+	metaN := max(o.meta, 1)
+	queue := make(chan *ahead, metaN)
+	metaSem := make(chan struct{}, metaN)
+	scheduled := make(chan error, 1)
+	go func() {
+		var err error
+		for a := range queue {
+			<-a.done
+			if err != nil || ctx.Err() != nil {
+				continue // drain
+			}
+			e := a.err
+			if e == nil {
+				e = schedule(ctx, o, d, a.it, a.m, jobs, &st)
+			}
+			if e != nil && ctx.Err() == nil {
+				// The metadata could not be had even with retries, or the
+				// item could not be queued: note it and go on with the next.
+				logf("FAILED %s: %v", a.it.ID, e)
+				err = d.setItem(a.it, stIncomplete, 0, 0, e.Error())
+			}
+			if err != nil {
+				dbErr.set(err)
+			}
+		}
+		close(jobs)
+		scheduled <- err
+	}()
 
 	start := time.Now()
 	var queuedBytes int64
@@ -353,22 +418,30 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 			queuedBytes += it.Size
 			continue
 		}
-		if err := schedule(ctx, o, c, d, it, jobs, &st); err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			// The metadata could not be had even with retries: note it
-			// and go on with the next item.
-			logf("FAILED %s: %v", it.ID, err)
-			if err := d.setItem(it, stIncomplete, 0, 0, err.Error()); err != nil {
-				return err
-			}
+		select {
+		case metaSem <- struct{}{}: // at most o.meta requests out at once
+		case <-ctx.Done():
+			continue // the loop ends at the top
+		}
+		a := &ahead{it: it, done: make(chan struct{})}
+		go func() {
+			defer close(a.done)
+			defer func() { <-metaSem }()
+			a.m, a.err = c.metadata(ctx, a.it.ID)
+		}()
+		select {
+		case queue <- a:
+		case <-ctx.Done():
 		}
 	}
-	close(jobs)
+	close(queue)
+	schedErr := <-scheduled
 	wg.Wait()
 	if err := dbErr.get(); err != nil {
 		return err
+	}
+	if schedErr != nil {
+		return schedErr
 	}
 	if o.dryRun {
 		fmt.Fprintf(stdout, "%d items, %.2f GB (item sizes from the list); %d skipped as done or unavailable\n",
@@ -388,13 +461,8 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	return nil
 }
 
-// schedule fetches the file list of an item and queues the files it still
-// needs.
-func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs chan<- job, st *stats) error {
-	m, err := c.metadata(ctx, it.ID)
-	if err != nil {
-		return err
-	}
+// schedule queues the files an item still needs, from its metadata m.
+func schedule(ctx context.Context, o options, d *db, it item, m iaMeta, jobs chan<- job, st *stats) error {
 	switch {
 	case m.Dark:
 		logf("UNAVAILABLE %s: taken down on archive.org (dark)", it.ID)
@@ -439,7 +507,7 @@ func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs ch
 		if err != nil {
 			return err
 		}
-		todo = append(todo, job{run: r, file: f, path: p, part: partName(p, taken)})
+		todo = append(todo, job{run: r, file: f, nodes: m.Nodes, path: p, part: partName(p, taken)})
 	}
 	if len(todo) == 0 {
 		st.items.Add(1)
@@ -461,7 +529,7 @@ func schedule(ctx context.Context, o options, c *client, d *db, it item, jobs ch
 // the item. Only database errors are returned; they stop the run.
 func work(ctx context.Context, c *client, d *db, j job, st *stats) error {
 	r := j.run
-	err := c.download(ctx, r.item.ID, j.file, j.path, j.part)
+	err := c.download(ctx, r.item.ID, j.file, j.nodes, j.path, j.part)
 	if err == nil {
 		if err := d.fileDone(r.item.ID, j.file, j.path); err != nil {
 			return err
@@ -484,7 +552,7 @@ func work(ctx context.Context, c *client, d *db, j job, st *stats) error {
 	return d.setItem(r.item, stDone, r.files, r.bytes, "")
 }
 
-func progress(ctx context.Context, every time.Duration, c *client, st *stats, jobs int) {
+func progress(ctx context.Context, every time.Duration, c *client, st *stats, jobs, conns int) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	last, lastT := c.read.Load(), time.Now()
@@ -496,8 +564,8 @@ func progress(ctx context.Context, every time.Duration, c *client, st *stats, jo
 			n := c.read.Load()
 			rate := float64(n-last) / now.Sub(lastT).Seconds()
 			last, lastT = n, now
-			logf("progress: %d items done, %d files, %.2f GB read, %.1f MB/s over the last %s (%d workers)",
-				st.items.Load(), st.filesDone.Load(), float64(n)/1e9, rate/1e6, every, jobs)
+			logf("progress: %d items done, %d files, %.2f GB read, %.1f MB/s over the last %s (%d files, %d of %d connections busy)",
+				st.items.Load(), st.filesDone.Load(), float64(n)/1e9, rate/1e6, every, jobs, len(c.conns), conns)
 		}
 	}
 }

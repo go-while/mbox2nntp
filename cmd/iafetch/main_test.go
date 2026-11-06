@@ -31,10 +31,17 @@ type fakeIA struct {
 	stall    map[string]int // "id/name" -> bytes to send, once, before going silent
 	requests []string
 	ranges   int
+	// nodes makes the metadata name data nodes: this server, under
+	// /0/items/ID/, and the hosts in extraHosts.
+	nodes       bool
+	extraHosts  []string
+	nodeMissing map[string]bool // "id/name" -> 404 on the node, served by /download/
+	noRange     bool            // ignore Range headers
 }
 
 func newFake() *fakeIA {
-	return &fakeIA{items: map[string]map[string][]byte{}, md5s: map[string]string{}, dark: map[string]bool{}, fail500: map[string]int{}, stall: map[string]int{}}
+	return &fakeIA{items: map[string]map[string][]byte{}, md5s: map[string]string{}, dark: map[string]bool{},
+		fail500: map[string]int{}, stall: map[string]int{}, nodeMissing: map[string]bool{}}
 }
 
 func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -64,8 +71,13 @@ func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Created  int               `json:"created"`
 			Metadata map[string]string `json:"metadata"`
 			Files    []jf              `json:"files"`
+			Dir      string            `json:"dir,omitempty"`
+			Servers  []string          `json:"workable_servers,omitempty"`
 		}
 		out.Created, out.Metadata = 1, map[string]string{"identifier": id}
+		if f.nodes {
+			out.Dir, out.Servers = "/0/items/"+id, append([]string{r.Host}, f.extraHosts...)
+		}
 		for name, b := range files {
 			sum := md5.Sum(b)
 			m := hex.EncodeToString(sum[:])
@@ -79,9 +91,13 @@ func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			jf{id + ".torrent", "metadata", "5", ""}, jf{id + "_meta.sqlite", "original", "8", ""}, jf{"thumb.jpg", "derivative", "3", ""},
 			jf{"history/files/old.mbox.7z.~1~", "original", "4", ""})
 		json.NewEncoder(w).Encode(out)
-	case strings.HasPrefix(p, "/download/"):
-		id, name, _ := strings.Cut(strings.TrimPrefix(p, "/download/"), "/")
+	case strings.HasPrefix(p, "/download/"), strings.HasPrefix(p, "/0/items/"):
+		node := strings.HasPrefix(p, "/0/items/")
+		id, name, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(p, "/download/"), "/0/items/"), "/")
 		b, ok := f.items[id][name]
+		if node && (!f.nodes || f.nodeMissing[id+"/"+name]) {
+			ok = false
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -100,6 +116,9 @@ func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			<-r.Context().Done()
 			f.mu.Lock()
 			return
+		}
+		if f.noRange {
+			r.Header.Del("Range")
 		}
 		if r.Header.Get("Range") != "" {
 			f.ranges++
@@ -530,5 +549,211 @@ func TestFirstErr(t *testing.T) {
 	wg.Wait()
 	if f.get() != first {
 		t.Errorf("get = %v, want the first", f.get())
+	}
+}
+
+func count(reqs []string, prefix string) int {
+	n := 0
+	for _, r := range reqs {
+		if strings.HasPrefix(r, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+// With -nodes the files come from the data nodes the metadata names, and
+// from /download/ only when a node does not have one.
+func TestNodesDirect(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	fake.items["it"] = map[string][]byte{"f": []byte("from the node"), "sub/g h": []byte("only via the front door")}
+	fake.nodes, o.nodes = true, true
+	fake.extraHosts = []string{"bad/host", "user@host", ""} // left out
+	fake.nodeMissing["it/sub/g h"] = true
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range fake.items["it"] {
+		if b, err := os.ReadFile(filepath.Join(o.out, "it", name)); err != nil || !bytes.Equal(b, fake.items["it"][name]) {
+			t.Errorf("%s: %q, %v; want %q", name, b, err, want)
+		}
+	}
+	reqs := fake.reset()
+	for p, want := range map[string]int{
+		"/0/items/it/f": 1, "/download/it/f": 0, "/0/items/it/sub/g h": 1, "/download/it/sub/g h": 1,
+	} {
+		if n := count(reqs, p); n != want {
+			t.Errorf("%d requests for %s, want %d (all: %q)", n, p, want, reqs)
+		}
+	}
+}
+
+func TestNodeURLs(t *testing.T) {
+	got := nodeURLs("https://archive.org", "/12/items/a b", []string{"ia1.us.archive.org", "ia1.us.archive.org", "x/y", "a@b", "", "dn2:8443"})
+	want := []string{"https://ia1.us.archive.org/12/items/a%20b", "https://dn2:8443/12/items/a%20b"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("nodeURLs = %q, want %q", got, want)
+	}
+	for _, dir := range []string{"", "12/items/x", "/12/../etc", "/12//x"} {
+		if got := nodeURLs("https://archive.org", dir, []string{"h"}); got != nil {
+			t.Errorf("dir %q: %q", dir, got)
+		}
+	}
+}
+
+// The front door joins the round only after each node failed once.
+func TestMirrorsPick(t *testing.T) {
+	m := newMirrors("https://archive.org", "it", "f", []string{"https://n1/d", "https://n2/d"})
+	seen := map[string]int{}
+	for range 4 {
+		seen[m.pick()]++
+	}
+	if seen["https://n1/d/f"] != 2 || seen["https://n2/d/f"] != 2 {
+		t.Errorf("before failures: %v", seen)
+	}
+	m.fail()
+	m.fail()
+	seen = map[string]int{}
+	for range 6 {
+		seen[m.pick()]++
+	}
+	if seen["https://archive.org/download/it/f"] != 2 {
+		t.Errorf("after failures: %v", seen)
+	}
+	if !m.drop("https://n1/d/f") || !m.drop("https://n2/d/f") || m.drop("https://archive.org/download/it/f") {
+		t.Error("drop")
+	}
+	if u := m.pick(); u != "https://archive.org/download/it/f" {
+		t.Errorf("no nodes left: %s", u)
+	}
+}
+
+func pieceCount(t *testing.T, o options) int {
+	t.Helper()
+	d, err := openDB(o.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	var n int
+	if err := d.QueryRow(`SELECT COUNT(*) FROM pieces`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// A file larger than -piece is fetched in pieces, in parallel.
+func TestPieces(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525) // 10500 bytes: 11 pieces
+	fake.items["it"] = map[string][]byte{"big": content, "small": []byte("small")}
+	fake.nodes, o.nodes = true, true
+	o.piece, o.conns = 1000, 4
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+	if fake.ranges != 11 {
+		t.Errorf("%d range requests, want 11", fake.ranges)
+	}
+	if reqs := fake.reset(); count(reqs, "/download/") != 0 {
+		t.Errorf("went through the front door: %q", reqs)
+	}
+	if n := pieceCount(t, o); n != 0 {
+		t.Errorf("%d pieces left in the database", n)
+	}
+	if left, _ := filepath.Glob(filepath.Join(o.out, "it", "*.part*")); len(left) != 0 {
+		t.Errorf("left %q", left)
+	}
+}
+
+// The finished pieces are in the database: the next run fetches the rest.
+func TestPiecesResume(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
+	fake.items["it"] = map[string][]byte{"big": content}
+	fake.fail500["it/big"] = 3
+	o.piece, o.conns, o.retries = 1000, 1, 0
+	if err := run(context.Background(), o, list, os.Stdout); err == nil {
+		t.Fatal("no error with 3 pieces failing")
+	}
+	if n := pieceCount(t, o); n != 8 {
+		t.Errorf("%d pieces recorded, want 8", n)
+	}
+	fake.ranges = 0
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if fake.ranges != 3 {
+		t.Errorf("second run: %d range requests, want 3", fake.ranges)
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+	if s := statuses(t, o); s["it"] != stDone {
+		t.Errorf("status %q", s["it"])
+	}
+}
+
+// A .part from a download from the start (an older iafetch, or -piece 0):
+// its whole pieces are kept.
+func TestPiecesFromSequentialPart(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
+	fake.items["it"] = map[string][]byte{"big": content}
+	o.piece, o.conns = 1000, 3
+	os.MkdirAll(filepath.Join(o.out, "it"), 0o755)
+	if err := os.WriteFile(filepath.Join(o.out, "it", "big.part"), content[:3500], 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if fake.ranges != 8 {
+		t.Errorf("%d range requests, want 8 (pieces 3 to 10)", fake.ranges)
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+}
+
+// A server that answers a piece with the whole file: downloaded in one go.
+func TestPiecesNoRange(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
+	fake.items["it"] = map[string][]byte{"big": content}
+	fake.noRange = true
+	o.piece, o.conns = 1000, 4
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(filepath.Join(o.out, "it", "big")); err != nil || !bytes.Equal(b, content) {
+		t.Fatalf("big: %d bytes, %v", len(b), err)
+	}
+	if n := pieceCount(t, o); n != 0 {
+		t.Errorf("%d pieces left in the database", n)
+	}
+}
+
+// A piece that arrives wrong fails the md5 of the whole: started over.
+func TestPiecesBadMD5(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit\n")
+	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
+	fake.items["it"] = map[string][]byte{"big": content}
+	fake.md5s["it/big"] = strings.Repeat("0", 32)
+	o.piece, o.conns, o.retries = 1000, 4, 1
+	if err := run(context.Background(), o, list, os.Stdout); err == nil {
+		t.Fatal("no error for a wrong md5")
+	}
+	if fake.ranges != 22 {
+		t.Errorf("%d range requests, want 22: every piece again on the second try", fake.ranges)
+	}
+	if _, err := os.Stat(filepath.Join(o.out, "it", "big")); err == nil {
+		t.Error("kept under its name")
+	}
+	if n := pieceCount(t, o); n != 0 {
+		t.Errorf("%d pieces left in the database", n)
 	}
 }

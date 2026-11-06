@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **iafetch** downloads at line speed. Measured on a 1 Gbit/s line, it went from about 50 MB/s to about 113 MB/s:
+  - Files come straight from the item's data nodes, as named in its metadata. `archive.org/download/` is still asked when a node lacks a file or each node has failed. `-nodes=false` restores the old behaviour.
+  - Files over `-piece` MB (default 32) are fetched in pieces, in parallel. The finished pieces are recorded in a new `pieces` table, so a stopped download resumes with the pieces it lacks. A server that ignores Range gets the file in one go.
+  - `-conns` (default 64) caps the requests in flight, files and pieces together.
+  - `-meta` (default 8) fetches the metadata of the next items while files download.
+  - The default `-j` goes from 4 to 16.
+
 - Header lines are quoted like body lines: uatexport and ncexport put a `>` before a header line starting `From ` or `#! rnews ` (after any number of `>`), and mbox2nntp takes it off again when the article has `X-Mbox2nntp-Format: mboxrd`. Before, a header line shaped like a separator, such as `From nobody Thu Dec  8 12:55:04 2016`, ended the article there and lost its body. usenet_archiver already quoted header lines; its articles now arrive unchanged too.
 
 ## v0.3.2 (2026-10-22)
