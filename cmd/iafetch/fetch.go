@@ -441,14 +441,14 @@ func localPath(dir, id string, f iaFile) (string, error) {
 }
 
 // verify checks a complete file against the size and md5 of the metadata.
-func verify(path string, f iaFile) error {
+func verify(ctx context.Context, path string, f iaFile) error {
 	fh, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer fh.Close()
 	h := md5.New()
-	n, err := io.Copy(h, fh)
+	n, err := io.Copy(h, ctxReader{ctx, fh})
 	if err != nil {
 		return err
 	}
@@ -475,7 +475,7 @@ func (c *client) download(ctx context.Context, id string, f iaFile, nodes []stri
 	if _, err := os.Stat(path); err == nil {
 		// Left by an earlier run that stopped before recording it, or put
 		// there by hand: keep it if it is the right file.
-		if err := verify(path, f); err != nil {
+		if err := verify(ctx, path, f); err != nil {
 			return permanentError{fmt.Errorf("%s exists and is not the file of the item (%v); move it away", path, err)}
 		}
 		return nil
@@ -622,7 +622,7 @@ func (c *client) fetchSplit(ctx context.Context, id string, f iaFile, m *mirrors
 		return permanentError{err}
 	}
 	h := md5.New()
-	got, err := io.Copy(h, fh)
+	got, err := io.Copy(h, ctxReader{ctx, fh})
 	if err != nil {
 		return err
 	}
@@ -698,7 +698,7 @@ func (c *client) fetchPart(ctx context.Context, m *mirrors, part string, f iaFil
 	}
 	defer fh.Close()
 	h := md5.New()
-	have, err := io.Copy(h, fh)
+	have, err := io.Copy(h, ctxReader{ctx, fh})
 	if err != nil {
 		return err
 	}
@@ -766,4 +766,18 @@ func (c *counter) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n.Add(int64(n))
 	return n, err
+}
+
+// ctxReader stops reading when ctx ends: the md5 of a big file on a busy
+// disk takes minutes, and Ctrl-C should not wait for it.
+type ctxReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (c ctxReader) Read(p []byte) (int, error) {
+	if err := c.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return c.r.Read(p)
 }
