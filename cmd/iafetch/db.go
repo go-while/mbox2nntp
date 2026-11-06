@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -55,6 +56,13 @@ CREATE TABLE IF NOT EXISTS pieces (
 type db struct{ *sql.DB }
 
 func openDB(path string) (*db, error) {
+	// SQLite makes a new database 0644 whatever the umask, and gives the
+	// -wal and -shm files the mode of the database. Made here first, it
+	// gets 0666 less the umask: with umask 002 the group can read it too,
+	// which a reader of a WAL database needs write access for.
+	if f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o666); err == nil {
+		f.Close()
+	}
 	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() +
 		"?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"
 	d, err := sql.Open("sqlite", dsn)
