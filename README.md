@@ -315,7 +315,7 @@ go -C cmd/iafetch build -o ../../iafetch .
 iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
 iafetch -tier A archive.org/import-order.csv            # the early era first
 iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
-iafetch -j 384 -o /data/ia archive.org/import-order.csv  # a whole 1 Gbit/s line
+iafetch -j 512 -meta 32 -o /data/ia archive.org/import-order.csv  # a whole 1 Gbit/s line
 iafetch -status -db /data/iafetch.sqlite                # what the database records
 ```
 
@@ -345,8 +345,10 @@ iafetch -status -db /data/iafetch.sqlite                # what the database reco
   `dir`): `archive.org/download/` only redirects there, and with many downloads at once
   those redirects are what limits the rate. `/download/` is asked when a node does not
   have the file, or once each node has failed; `-nodes=false` always goes through it.
-  Measured on a 1 Gbit/s line: about 50 MB/s through `/download/`, about 113 MB/s from the
-  nodes with 384 connections.
+  Requests use HTTP/1.1, one TCP connection each: over the nodes' HTTP/2 the requests to one
+  node shared one connection and its speed. Measured on a 1 Gbit/s line: about 50 MB/s
+  through `/download/`; from the nodes 72 MB/s over HTTP/2 and 116 MB/s over HTTP/1.1, with
+  `-j 512 -meta 32`.
 - **Checking.** A file is written to `FILE.part` and renamed to `FILE` only when its size
   and md5 match the metadata. A stopped run (Ctrl-C) leaves `.part` files, which the next
   run resumes with a range request; for a file fetched in pieces, the finished pieces are

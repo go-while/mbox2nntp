@@ -11,6 +11,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/tls"
 	"encoding/csv"
 	"errors"
 	"flag"
@@ -56,7 +57,7 @@ while both have -host-conns requests out, so that the items running at
 once spread over the servers instead of piling onto one.
 
 By default an item has one connection: archive.org gives one connection
-well under 1 MB/s, so a fast line needs many items at once (-j 384 fills
+well under 1 MB/s, so a fast line needs many items at once (-j 512 -meta 32 fill
 1 Gbit/s). With -item-conns above 1, files larger than -piece MB are
 fetched in pieces of that size, that many side by side; the database
 records the finished pieces, so a stopped download resumes with the
@@ -318,12 +319,7 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	if conns < 1 {
 		conns = o.jobs * max(o.itemConns, 1)
 	}
-	// DefaultTransport's dial, TLS handshake and idle timeouts; the stall
-	// watchdog (client.get) covers the rest
-	tr := http.DefaultTransport.(*http.Transport).Clone()
-	tr.MaxIdleConns = 0 // no limit; per host as below
-	tr.MaxIdleConnsPerHost = conns + o.meta + 1
-	tr.ResponseHeaderTimeout = 2 * time.Minute
+	tr := newTransport(conns + o.meta + 1)
 	c := &client{
 		http:    &http.Client{Transport: tr},
 		base:    strings.TrimRight(o.base, "/"),
@@ -585,4 +581,29 @@ func progress(ctx context.Context, every time.Duration, c *client, st *stats, jo
 				st.items.Load(), st.filesDone.Load(), float64(n)/1e9, rate/1e6, every, jobs, len(c.conns), conns)
 		}
 	}
+}
+
+// newTransport is DefaultTransport with idle connections kept for up to
+// perHost requests to one server, and HTTP/1.1 only. The data nodes speak
+// HTTP/2, which put all the requests to one node on one TCP connection,
+// and they then shared its speed: on arc1-ca 512 requests got 72 MB/s,
+// half the rate per request of separate connections. Now each request has
+// its own connection, at most -host-conns per server.
+func newTransport(perHost int) *http.Transport {
+	// DefaultTransport's dial, TLS handshake and idle timeouts; the stall
+	// watchdog (client.get) covers the rest
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConns = 0 // no limit; per host as below
+	tr.MaxIdleConnsPerHost = perHost
+	tr.ResponseHeaderTimeout = 2 * time.Minute
+	tr.Protocols = new(http.Protocols)
+	tr.Protocols.SetHTTP1(true)
+	// Clone sets up HTTP/2 on DefaultTransport first and copies its TLS
+	// config, which then still offers h2 to the server: a server that takes
+	// it answers in HTTP/2, which an HTTP/1-only transport cannot read.
+	if tr.TLSClientConfig == nil {
+		tr.TLSClientConfig = &tls.Config{}
+	}
+	tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+	return tr
 }

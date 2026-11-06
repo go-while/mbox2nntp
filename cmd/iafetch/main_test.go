@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -912,5 +913,34 @@ func TestSlowMetadata(t *testing.T) {
 	}
 	if s := statuses(t, o); s["slow"] != stDone || s["it2"] != stDone || s["it3"] != stDone {
 		t.Errorf("statuses %v", s)
+	}
+}
+
+// The transport asks for HTTP/1.1 even from a server that offers HTTP/2.
+func TestTransportHTTP1(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.Proto)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	// the server's own client speaks HTTP/2 to it
+	if resp, err := srv.Client().Get(srv.URL); err != nil || resp.ProtoMajor != 2 {
+		t.Fatalf("the test server does not offer HTTP/2: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+	tr := newTransport(4)
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	tr.TLSClientConfig.RootCAs = pool
+	resp, err := (&http.Client{Transport: tr}).Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.ProtoMajor != 1 || string(b) != "HTTP/1.1" {
+		t.Errorf("got %s, the server saw %s", resp.Proto, b)
 	}
 }
