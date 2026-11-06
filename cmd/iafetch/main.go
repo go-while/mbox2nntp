@@ -1,5 +1,5 @@
 // Command iafetch downloads archive.org items in the order of a list such as
-// archive.org/import-order.csv, several files at a time, and records in a
+// archive.org/import-order.csv, several items at a time, and records in a
 // SQLite database what it got. An item recorded as done is skipped on later
 // runs without asking archive.org, so the files can be moved away (after
 // they are imported, say) and the next run goes on with the items after
@@ -33,7 +33,7 @@ import (
 const usage = `Usage: %[1]s [flags] LIST.csv
 
 Downloads the archive.org items of LIST.csv, in its order, to DIR/ITEM/FILE
-(-o sets DIR), -j files at a time.
+(-o sets DIR), -j items at a time, the files of an item one after another.
 
 LIST.csv needs a header line with an "identifier" column. The columns
 "order", "tier", "list" and "item_size" are used when present: items are
@@ -51,11 +51,16 @@ match the metadata. Failed requests are retried with a growing pause.
 
 Files come straight from the data nodes the metadata names, archive.org's
 /download/ only when a node lacks a file or each has failed (-nodes).
-Files larger than -piece MB are fetched in pieces of that size side by
-side; the database records the finished pieces, so a stopped download
-resumes with the missing ones. -conns caps the requests in flight, files
-and pieces together; archive.org gives one connection well under 1 MB/s,
-so a fast line needs hundreds (-j 128 -conns 384 fills 1 Gbit/s).
+Each item has two nodes; a request goes to the less busy one, and waits
+while both have -host-conns requests out, so that the items running at
+once spread over the servers instead of piling onto one.
+
+By default an item has one connection: archive.org gives one connection
+well under 1 MB/s, so a fast line needs many items at once (-j 384 fills
+1 Gbit/s). With -item-conns above 1, files larger than -piece MB are
+fetched in pieces of that size, that many side by side; the database
+records the finished pieces, so a stopped download resumes with the
+missing ones. -conns caps the requests in flight in all.
 
 The database (-db) records each downloaded file and the state of each item:
   done        every file downloaded and verified; skipped from then on,
@@ -85,7 +90,9 @@ type options struct {
 	base             string
 	backoff          time.Duration
 	stall            time.Duration
-	conns, meta      int   // requests at once; metadata requests ahead
+	conns, meta      int   // requests at once (0: jobs x itemConns); metadata requests ahead
+	itemConns        int   // requests at once for one item (pieces of a big file)
+	hostConns        int   // requests at once to one server; 0 for no limit
 	piece            int64 // bytes; 0 never splits
 	nodes            bool  // ask the data nodes directly
 }
@@ -107,9 +114,11 @@ func parseFlags(args []string) (options, string) {
 	fs := flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	fs.StringVar(&o.out, "o", "ia-download", "download to `DIR`/ITEM/FILE")
 	fs.StringVar(&o.dbPath, "db", "iafetch.sqlite", "SQLite database `PATH` that records what was downloaded")
-	fs.IntVar(&o.jobs, "j", 16, "download `N` files at a time")
-	fs.IntVar(&o.conns, "conns", 64, "at most `N` downloads at once, files and pieces of big files together")
-	pieceMB := fs.Int("piece", 32, "fetch files larger than `MB` megabytes in pieces of that size, in parallel; 0 for never")
+	fs.IntVar(&o.jobs, "j", 64, "download `N` items at a time, the files of each one after another")
+	fs.IntVar(&o.itemConns, "item-conns", 1, "at most `N` connections per item: files larger than -piece come in N pieces side by side; 1 never splits")
+	fs.IntVar(&o.hostConns, "host-conns", 4, "at most `N` connections to one archive.org server; 0 for no limit")
+	fs.IntVar(&o.conns, "conns", 0, "at most `N` connections in all; 0 for -j times -item-conns")
+	pieceMB := fs.Int("piece", 32, "with -item-conns above 1, fetch files larger than `MB` megabytes in pieces of that size; 0 for never")
 	fs.IntVar(&o.meta, "meta", 8, "fetch the metadata of up to `N` items ahead")
 	fs.BoolVar(&o.nodes, "nodes", true, "download from the item's data nodes, as the metadata names them, instead of through archive.org/download/")
 	fs.IntVar(&o.retries, "retries", 8, "retry a failed request `N` times, waiting 5s, 10s, 20s ... up to 5m20s")
@@ -136,7 +145,7 @@ func parseFlags(args []string) (options, string) {
 		fmt.Println(versionString("iafetch"))
 		os.Exit(0)
 	}
-	if (fs.NArg() != 1 && !o.status) || fs.NArg() > 1 || o.jobs < 1 || o.conns < 1 || o.meta < 1 || *pieceMB < 0 {
+	if (fs.NArg() != 1 && !o.status) || fs.NArg() > 1 || o.jobs < 1 || o.conns < 0 || o.itemConns < 1 || o.hostConns < 0 || o.meta < 1 || *pieceMB < 0 {
 		fs.Usage()
 		os.Exit(2)
 	}
@@ -306,8 +315,8 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	}
 
 	conns := o.conns
-	if conns < 1 { // not set (tests): one per worker
-		conns = o.jobs
+	if conns < 1 {
+		conns = o.jobs * max(o.itemConns, 1)
 	}
 	// DefaultTransport's dial, TLS handshake and idle timeouts; the stall
 	// watchdog (client.get) covers the rest
@@ -324,20 +333,24 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 		stall:   o.stall,
 		nodes:   o.nodes,
 		piece:   o.piece,
+		split:   o.itemConns,
 		conns:   make(chan struct{}, conns),
+		hosts:   newHostSlots(o.hostConns),
 		db:      d,
 	}
 	var st stats
-	jobs := make(chan job, o.jobs)
+	jobs := make(chan []job) // the files of one item
 	var wg sync.WaitGroup
 	var dbErr firstErr
 	for range o.jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := range jobs {
-				if err := work(ctx, c, d, j, &st); err != nil {
-					dbErr.set(err)
+			for files := range jobs {
+				for _, j := range files {
+					if err := work(ctx, c, d, j, &st); err != nil {
+						dbErr.set(err)
+					}
 				}
 			}
 		}()
@@ -462,7 +475,7 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 }
 
 // schedule queues the files an item still needs, from its metadata m.
-func schedule(ctx context.Context, o options, d *db, it item, m iaMeta, jobs chan<- job, st *stats) error {
+func schedule(ctx context.Context, o options, d *db, it item, m iaMeta, jobs chan<- []job, st *stats) error {
 	switch {
 	case m.Dark:
 		logf("UNAVAILABLE %s: taken down on archive.org (dark)", it.ID)
@@ -515,14 +528,12 @@ func schedule(ctx context.Context, o options, d *db, it item, m iaMeta, jobs cha
 	}
 	logf("item %d %s: %d files, %.2f GB (%d done before)", it.Order, it.ID, len(todo), float64(bytes)/1e9, len(files)-len(todo))
 	r.pending.Store(int32(len(todo)))
-	for _, j := range todo {
-		select {
-		case jobs <- j:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	select {
+	case jobs <- todo:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	return nil
 }
 
 // work downloads one file and, when it was the last of its item, records
@@ -564,7 +575,7 @@ func progress(ctx context.Context, every time.Duration, c *client, st *stats, jo
 			n := c.read.Load()
 			rate := float64(n-last) / now.Sub(lastT).Seconds()
 			last, lastT = n, now
-			logf("progress: %d items done, %d files, %.2f GB read, %.1f MB/s over the last %s (%d files, %d of %d connections busy)",
+			logf("progress: %d items done, %d files, %.2f GB read, %.1f MB/s over the last %s (%d items at a time, %d of %d connections busy)",
 				st.items.Load(), st.filesDone.Load(), float64(n)/1e9, rate/1e6, every, jobs, len(c.conns), conns)
 		}
 	}

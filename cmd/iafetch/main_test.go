@@ -37,6 +37,14 @@ type fakeIA struct {
 	extraHosts  []string
 	nodeMissing map[string]bool // "id/name" -> 404 on the node, served by /download/
 	noRange     bool            // ignore Range headers
+	// slow holds every file request this long, outside mu, and counts the
+	// requests in flight, in all and per item.
+	slow      time.Duration
+	cmu       sync.Mutex
+	inflight  map[string]int
+	maxItem   map[string]int
+	maxAll    int
+	inflightN int
 }
 
 func newFake() *fakeIA {
@@ -45,6 +53,25 @@ func newFake() *fakeIA {
 }
 
 func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if f.slow > 0 && !strings.HasPrefix(r.URL.Path, "/metadata/") {
+		id, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/download/"), "/0/items/"), "/")
+		f.cmu.Lock()
+		if f.inflight == nil {
+			f.inflight, f.maxItem = map[string]int{}, map[string]int{}
+		}
+		f.inflight[id]++
+		f.inflightN++
+		f.maxItem[id] = max(f.maxItem[id], f.inflight[id])
+		f.maxAll = max(f.maxAll, f.inflightN)
+		f.cmu.Unlock()
+		time.Sleep(f.slow)
+		defer func() {
+			f.cmu.Lock()
+			f.inflight[id]--
+			f.inflightN--
+			f.cmu.Unlock()
+		}()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	p, _ := url.PathUnescape(r.URL.EscapedPath())
@@ -606,7 +633,7 @@ func TestMirrorsPick(t *testing.T) {
 	m := newMirrors("https://archive.org", "it", "f", []string{"https://n1/d", "https://n2/d"})
 	seen := map[string]int{}
 	for range 4 {
-		seen[m.pick()]++
+		seen[m.pick()[0]]++
 	}
 	if seen["https://n1/d/f"] != 2 || seen["https://n2/d/f"] != 2 {
 		t.Errorf("before failures: %v", seen)
@@ -615,7 +642,7 @@ func TestMirrorsPick(t *testing.T) {
 	m.fail()
 	seen = map[string]int{}
 	for range 6 {
-		seen[m.pick()]++
+		seen[m.pick()[0]]++
 	}
 	if seen["https://archive.org/download/it/f"] != 2 {
 		t.Errorf("after failures: %v", seen)
@@ -623,8 +650,104 @@ func TestMirrorsPick(t *testing.T) {
 	if !m.drop("https://n1/d/f") || !m.drop("https://n2/d/f") || m.drop("https://archive.org/download/it/f") {
 		t.Error("drop")
 	}
-	if u := m.pick(); u != "https://archive.org/download/it/f" {
-		t.Errorf("no nodes left: %s", u)
+	if u := m.pick(); len(u) != 1 || u[0] != "https://archive.org/download/it/f" {
+		t.Errorf("no nodes left: %q", u)
+	}
+}
+
+func TestHostSlots(t *testing.T) {
+	h := newHostSlots(2)
+	ctx := context.Background()
+	urls := []string{"https://a/x", "https://b/x"}
+	got := map[string]int{}
+	var rels []func()
+	for range 4 {
+		u, rel, err := h.take(ctx, urls)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got[hostOf(u)]++
+		rels = append(rels, rel)
+	}
+	if got["a"] != 2 || got["b"] != 2 {
+		t.Errorf("not spread: %v", got)
+	}
+	// both full: the next waits for a slot
+	tctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	if _, _, err := h.take(tctx, urls); err == nil {
+		t.Error("a third request to a full server")
+	}
+	cancel()
+	done := make(chan string)
+	go func() {
+		u, _, _ := h.take(ctx, urls)
+		done <- u
+	}()
+	time.Sleep(10 * time.Millisecond)
+	rels[3]() // the 4th went to b
+	rels[3]() // twice is harmless
+	select {
+	case u := <-done:
+		if hostOf(u) != "b" {
+			t.Errorf("got %s, want the freed b", u)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no slot after a release")
+	}
+	if n := h.busy["b"]; n != 2 {
+		t.Errorf("b busy %d, want 2", n)
+	}
+	if newHostSlots(0) != nil {
+		t.Error("0 is no limit")
+	}
+	if u, rel, err := (*hostSlots)(nil).take(ctx, urls); err != nil || u != urls[0] {
+		t.Errorf("no limit: %s %v", u, err)
+	} else {
+		rel()
+	}
+}
+
+// By default an item has one connection: its files come one after another
+// and a big one in one go, while the items run side by side.
+func TestOneConnPerItem(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit1\nit2\nit3\n")
+	big := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
+	for _, id := range []string{"it1", "it2", "it3"} {
+		fake.items[id] = map[string][]byte{"big": big, "a": []byte("a"), "b": []byte("b"), "c": []byte("c")}
+	}
+	fake.nodes, o.nodes = true, true
+	fake.slow = 20 * time.Millisecond
+	o.piece, o.itemConns = 1000, 1
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	for id, n := range fake.maxItem {
+		if n != 1 {
+			t.Errorf("%s: %d connections at once", id, n)
+		}
+	}
+	if fake.maxAll < 2 {
+		t.Errorf("items one at a time: at most %d connections", fake.maxAll)
+	}
+	if fake.ranges != 0 {
+		t.Errorf("%d range requests: a file was split", fake.ranges)
+	}
+}
+
+// -host-conns caps the connections to one server, whatever -j says.
+func TestHostConns(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nit1\nit2\nit3\n")
+	for _, id := range []string{"it1", "it2", "it3"} {
+		fake.items[id] = map[string][]byte{"a": []byte("a"), "b": []byte("b")}
+	}
+	fake.nodes, o.nodes = true, true
+	fake.slow = 10 * time.Millisecond
+	o.jobs, o.hostConns = 3, 1
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	if fake.maxAll != 1 {
+		t.Errorf("%d connections at once to the one server", fake.maxAll)
 	}
 }
 
@@ -649,6 +772,7 @@ func TestPieces(t *testing.T) {
 	fake.items["it"] = map[string][]byte{"big": content, "small": []byte("small")}
 	fake.nodes, o.nodes = true, true
 	o.piece, o.conns = 1000, 4
+	o.itemConns = 4
 	if err := run(context.Background(), o, list, os.Stdout); err != nil {
 		t.Fatal(err)
 	}
@@ -676,6 +800,7 @@ func TestPiecesResume(t *testing.T) {
 	fake.items["it"] = map[string][]byte{"big": content}
 	fake.fail500["it/big"] = 3
 	o.piece, o.conns, o.retries = 1000, 1, 0
+	o.itemConns = 4
 	if err := run(context.Background(), o, list, os.Stdout); err == nil {
 		t.Fatal("no error with 3 pieces failing")
 	}
@@ -704,6 +829,7 @@ func TestPiecesFromSequentialPart(t *testing.T) {
 	content := bytes.Repeat([]byte("0123456789abcdefghij"), 525)
 	fake.items["it"] = map[string][]byte{"big": content}
 	o.piece, o.conns = 1000, 3
+	o.itemConns = 4
 	os.MkdirAll(filepath.Join(o.out, "it"), 0o755)
 	if err := os.WriteFile(filepath.Join(o.out, "it", "big.part"), content[:3500], 0o644); err != nil {
 		t.Fatal(err)
@@ -726,6 +852,7 @@ func TestPiecesNoRange(t *testing.T) {
 	fake.items["it"] = map[string][]byte{"big": content}
 	fake.noRange = true
 	o.piece, o.conns = 1000, 4
+	o.itemConns = 4
 	if err := run(context.Background(), o, list, os.Stdout); err != nil {
 		t.Fatal(err)
 	}
@@ -744,6 +871,7 @@ func TestPiecesBadMD5(t *testing.T) {
 	fake.items["it"] = map[string][]byte{"big": content}
 	fake.md5s["it/big"] = strings.Repeat("0", 32)
 	o.piece, o.conns, o.retries = 1000, 4, 1
+	o.itemConns = 4
 	if err := run(context.Background(), o, list, os.Stdout); err == nil {
 		t.Fatal("no error for a wrong md5")
 	}

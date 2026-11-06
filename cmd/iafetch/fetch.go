@@ -85,8 +85,87 @@ type client struct {
 	read    atomic.Int64  // bytes downloaded, for the progress line
 	nodes   bool          // download from the data nodes (iaMeta.Nodes)
 	piece   int64         // fetch files larger than this in pieces of this size; 0 never
+	split   int           // pieces of one file at a time; below 2 files are never split
 	conns   chan struct{} // one token per request in flight, files and pieces alike
+	hosts   *hostSlots    // requests per server; nil for no limit
 	db      *db           // records the finished pieces
+}
+
+// hostSlots caps the requests in flight to each server, so that many
+// items at once do not pile onto the few nodes that hold several of them.
+type hostSlots struct {
+	max   int
+	mu    sync.Mutex
+	busy  map[string]int
+	freed chan struct{} // closed, and replaced, when a slot frees
+}
+
+func newHostSlots(max int) *hostSlots {
+	if max < 1 {
+		return nil
+	}
+	return &hostSlots{max: max, busy: map[string]int{}, freed: make(chan struct{})}
+}
+
+func hostOf(u string) string {
+	if p, err := url.Parse(u); err == nil {
+		return p.Host
+	}
+	return u
+}
+
+// take picks the least busy server of urls that has a slot free, the first
+// in urls on a tie, and waits while all are full. release gives the slot
+// back; it may be called more than once.
+func (h *hostSlots) take(ctx context.Context, urls []string) (u string, release func(), err error) {
+	if h == nil {
+		return urls[0], func() {}, nil
+	}
+	for {
+		h.mu.Lock()
+		best, bestN := "", 0
+		for _, c := range urls {
+			if n := h.busy[hostOf(c)]; n < h.max && (best == "" || n < bestN) {
+				best, bestN = c, n
+			}
+		}
+		if best != "" {
+			host := hostOf(best)
+			h.busy[host]++
+			h.mu.Unlock()
+			var once sync.Once
+			return best, func() {
+				once.Do(func() {
+					h.mu.Lock()
+					if h.busy[host]--; h.busy[host] <= 0 {
+						delete(h.busy, host)
+					}
+					close(h.freed)
+					h.freed = make(chan struct{})
+					h.mu.Unlock()
+				})
+			}, nil
+		}
+		freed := h.freed
+		h.mu.Unlock()
+		select {
+		case <-freed:
+		case <-ctx.Done():
+			return "", nil, ctx.Err()
+		}
+	}
+}
+
+// slotBody gives the server slot back when the body is closed.
+type slotBody struct {
+	io.ReadCloser
+	release func()
+}
+
+func (b slotBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.release()
+	return err
 }
 
 // retry runs f until it succeeds, fails permanently, the context ends or
@@ -182,23 +261,18 @@ func newMirrors(base, id, name string, nodes []string) *mirrors {
 	return m
 }
 
-// pick returns the URL to ask next; the calls go round the nodes.
-func (m *mirrors) pick() string {
+// pick returns the URLs to ask, best first; the first goes round the
+// nodes from call to call.
+func (m *mirrors) pick() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	n := len(m.nodes)
-	if n > 0 && m.failures >= n {
-		n++ // the front door joins the round
+	all := slices.Clone(m.nodes)
+	if len(all) == 0 || m.failures >= len(all) {
+		all = append(all, m.front) // the front door joins the round
 	}
-	if n == 0 {
-		return m.front
-	}
-	i := m.next % n
+	i := m.next % len(all)
 	m.next++
-	if i == len(m.nodes) {
-		return m.front
-	}
-	return m.nodes[i]
+	return append(all[i:], all[:i]...)
 }
 
 func (m *mirrors) fail() {
@@ -220,14 +294,20 @@ func (m *mirrors) drop(u string) bool {
 	return false
 }
 
-// fetch is get from the next of m's URLs. A node that answers 4xx is
-// dropped, and the error made one to retry: the next try asks another.
+// fetch is get from the next of m's URLs, the least busy one when there
+// is a limit per server (c.hosts). A node that answers 4xx is dropped, and
+// the error made one to retry: the next try asks another.
 func (c *client) fetch(ctx context.Context, m *mirrors, hdr map[string]string) (*http.Response, string, error) {
-	u := m.pick()
+	u, release, err := c.hosts.take(ctx, m.pick())
+	if err != nil {
+		return nil, "", err
+	}
 	resp, err := c.get(ctx, u, hdr)
 	if err == nil {
+		resp.Body = slotBody{resp.Body, release}
 		return resp, u, nil
 	}
+	release()
 	var se statusError
 	if errors.As(err, &se) && se.code < 500 && se.code != http.StatusTooManyRequests && m.drop(u) {
 		return nil, u, fmt.Errorf("%v; trying another server", se)
@@ -404,7 +484,7 @@ func (c *client) download(ctx context.Context, id string, f iaFile, nodes []stri
 		return permanentError{err}
 	}
 	m := newMirrors(c.base, id, f.Name, nodes)
-	split := c.piece > 0 && f.Size > c.piece && c.db != nil
+	split := c.piece > 0 && c.split > 1 && f.Size > c.piece && c.db != nil
 	err := c.retry(ctx, id+"/"+f.Name, func() error {
 		if split {
 			err := c.fetchSplit(ctx, id, f, m, part)
@@ -446,7 +526,7 @@ func (c *client) release() {
 }
 
 // fetchSplit downloads a file of more than c.piece bytes in pieces of that
-// size, as many at a time as there are connection tokens, each written to
+// size, c.split at a time while connection tokens last, each written to
 // its place in part. A finished piece is recorded in the database, so the
 // next try, or the next run, fetches only the pieces still missing. When
 // all are there the whole part is checked against the size and md5 of the
@@ -492,16 +572,22 @@ func (c *client) fetchSplit(ctx context.Context, id string, f iaFile, m *mirrors
 	defer cancel()
 	var wg sync.WaitGroup
 	var first firstErr
+	mine := make(chan struct{}, max(c.split, 1)) // this file's share
 	for i := 0; i < n && pctx.Err() == nil; i++ {
 		if done[i] {
 			continue
 		}
-		if !c.acquire(pctx) {
+		select {
+		case mine <- struct{}{}:
+		case <-pctx.Done():
+		}
+		if pctx.Err() != nil || !c.acquire(pctx) {
 			break
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer func() { <-mine }()
 			defer c.release()
 			start := int64(i) * c.piece
 			err := c.fetchPiece(pctx, m, fh, start, end(i)-1)
