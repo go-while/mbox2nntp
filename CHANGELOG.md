@@ -8,7 +8,7 @@
   - `-host-conns` (default 4) caps the connections to one data node. A request goes to the less busy of the item's two nodes, and waits while both are full. In any 256 consecutive items of the list no node holds more than 12, out of 318 nodes, so the cap seldom waits.
   - `-item-conns N` (default 1) allows N connections per item: files over `-piece` MB (default 32) are then fetched in N pieces side by side. The finished pieces are recorded in a new `pieces` table, so a stopped download resumes with the pieces it lacks. A server that ignores Range gets the file in one go.
   - `-conns` caps the connections in all; the default is `-j` times `-item-conns`.
-  - `-meta` (default 8) fetches the metadata of the next items while files download.
+  - `-meta` (default 8) metadata requests at once fetch the next items' metadata while files download, up to 4 × `-meta` items ahead. An item starts as soon as its metadata is in, so one hung metadata request no longer holds up the items behind it.
 
 - Header lines are quoted like body lines: uatexport and ncexport put a `>` before a header line starting `From ` or `#! rnews ` (after any number of `>`), and mbox2nntp takes it off again when the article has `X-Mbox2nntp-Format: mboxrd`. Before, a header line shaped like a separator, such as `From nobody Thu Dec  8 12:55:04 2016`, ended the article there and lost its body. usenet_archiver already quoted header lines; its articles now arrive unchanged too.
 

@@ -35,8 +35,9 @@ type fakeIA struct {
 	// /0/items/ID/, and the hosts in extraHosts.
 	nodes       bool
 	extraHosts  []string
-	nodeMissing map[string]bool // "id/name" -> 404 on the node, served by /download/
-	noRange     bool            // ignore Range headers
+	nodeMissing map[string]bool          // "id/name" -> 404 on the node, served by /download/
+	noRange     bool                     // ignore Range headers
+	metaDelay   map[string]time.Duration // id -> wait before answering /metadata/id
 	// slow holds every file request this long, outside mu, and counts the
 	// requests in flight, in all and per item.
 	slow      time.Duration
@@ -53,6 +54,9 @@ func newFake() *fakeIA {
 }
 
 func (f *fakeIA) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if d := f.metaDelay[strings.TrimPrefix(r.URL.Path, "/metadata/")]; d > 0 {
+		time.Sleep(d)
+	}
 	if f.slow > 0 && !strings.HasPrefix(r.URL.Path, "/metadata/") {
 		id, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(r.URL.Path, "/download/"), "/0/items/"), "/")
 		f.cmu.Lock()
@@ -883,5 +887,30 @@ func TestPiecesBadMD5(t *testing.T) {
 	}
 	if n := pieceCount(t, o); n != 0 {
 		t.Errorf("%d pieces left in the database", n)
+	}
+}
+
+// An item whose metadata is slow does not hold up the items after it.
+func TestSlowMetadata(t *testing.T) {
+	fake, o, list := setup(t, "identifier\nslow\nit2\nit3\n")
+	for _, id := range []string{"slow", "it2", "it3"} {
+		fake.items[id] = map[string][]byte{"f": []byte(id)}
+	}
+	fake.metaDelay = map[string]time.Duration{"slow": 300 * time.Millisecond}
+	o.jobs, o.meta = 2, 2
+	if err := run(context.Background(), o, list, os.Stdout); err != nil {
+		t.Fatal(err)
+	}
+	var order []string
+	for _, r := range fake.reset() {
+		if strings.HasPrefix(r, "/download/") {
+			order = append(order, r)
+		}
+	}
+	if len(order) != 3 || order[2] != "/download/slow/f" {
+		t.Errorf("downloads in order %q, want slow last", order)
+	}
+	if s := statuses(t, o); s["slow"] != stDone || s["it2"] != stDone || s["it3"] != stDone {
+		t.Errorf("statuses %v", s)
 	}
 }

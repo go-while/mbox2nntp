@@ -119,7 +119,7 @@ func parseFlags(args []string) (options, string) {
 	fs.IntVar(&o.hostConns, "host-conns", 4, "at most `N` connections to one archive.org server; 0 for no limit")
 	fs.IntVar(&o.conns, "conns", 0, "at most `N` connections in all; 0 for -j times -item-conns")
 	pieceMB := fs.Int("piece", 32, "with -item-conns above 1, fetch files larger than `MB` megabytes in pieces of that size; 0 for never")
-	fs.IntVar(&o.meta, "meta", 8, "fetch the metadata of up to `N` items ahead")
+	fs.IntVar(&o.meta, "meta", 8, "send up to `N` metadata requests at once, for up to 4N items ahead")
 	fs.BoolVar(&o.nodes, "nodes", true, "download from the item's data nodes, as the metadata names them, instead of through archive.org/download/")
 	fs.IntVar(&o.retries, "retries", 8, "retry a failed request `N` times, waiting 5s, 10s, 20s ... up to 5m20s")
 	fs.StringVar(&tiers, "tier", "A,B0,B1,B2,B3,B4,C", "only items of these `TIERS`, comma-separated; empty for all")
@@ -360,39 +360,41 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 	}
 
 	// The metadata of the next items is fetched while the files of the
-	// earlier ones download, up to o.meta items ahead; the items are still
-	// queued in order. One request at a time left the workers idle on
-	// items of many small files.
+	// earlier ones download, o.meta requests at once, and up to 4 x o.meta
+	// items ahead of the workers. An item goes to a worker as soon as its
+	// metadata is in, so the order is kept only roughly: in strict order, one
+	// metadata request that hung (archive.org's take minutes now and then)
+	// held up every item behind it, and the workers ran dry.
 	type ahead struct {
-		it   item
-		m    iaMeta
-		err  error
-		done chan struct{}
+		it  item
+		m   iaMeta
+		err error
 	}
 	metaN := max(o.meta, 1)
-	queue := make(chan *ahead, metaN)
-	metaSem := make(chan struct{}, metaN)
+	window := make(chan struct{}, 4*metaN) // items fetched ahead, not yet with a worker
+	metaReq := make(chan struct{}, metaN)  // metadata requests at once
+	ready := make(chan *ahead, 4*metaN)
+	var fetching sync.WaitGroup
 	scheduled := make(chan error, 1)
 	go func() {
 		var err error
-		for a := range queue {
-			<-a.done
-			if err != nil || ctx.Err() != nil {
-				continue // drain
+		for a := range ready {
+			if err == nil && ctx.Err() == nil {
+				e := a.err
+				if e == nil {
+					e = schedule(ctx, o, d, a.it, a.m, jobs, &st)
+				}
+				if e != nil && ctx.Err() == nil {
+					// The metadata could not be had even with retries, or the
+					// item could not be queued: note it and go on with the next.
+					logf("FAILED %s: %v", a.it.ID, e)
+					err = d.setItem(a.it, stIncomplete, 0, 0, e.Error())
+				}
+				if err != nil {
+					dbErr.set(err)
+				}
 			}
-			e := a.err
-			if e == nil {
-				e = schedule(ctx, o, d, a.it, a.m, jobs, &st)
-			}
-			if e != nil && ctx.Err() == nil {
-				// The metadata could not be had even with retries, or the
-				// item could not be queued: note it and go on with the next.
-				logf("FAILED %s: %v", a.it.ID, e)
-				err = d.setItem(a.it, stIncomplete, 0, 0, e.Error())
-			}
-			if err != nil {
-				dbErr.set(err)
-			}
+			<-window
 		}
 		close(jobs)
 		scheduled <- err
@@ -432,22 +434,26 @@ func run(ctx context.Context, o options, csvPath string, stdout io.Writer) error
 			continue
 		}
 		select {
-		case metaSem <- struct{}{}: // at most o.meta requests out at once
+		case window <- struct{}{}:
 		case <-ctx.Done():
 			continue // the loop ends at the top
 		}
-		a := &ahead{it: it, done: make(chan struct{})}
+		a := &ahead{it: it}
+		fetching.Add(1)
 		go func() {
-			defer close(a.done)
-			defer func() { <-metaSem }()
-			a.m, a.err = c.metadata(ctx, a.it.ID)
+			defer fetching.Done()
+			select {
+			case metaReq <- struct{}{}:
+				a.m, a.err = c.metadata(ctx, a.it.ID)
+				<-metaReq
+			case <-ctx.Done():
+				a.err = ctx.Err()
+			}
+			ready <- a // never blocks: ready holds a whole window
 		}()
-		select {
-		case queue <- a:
-		case <-ctx.Done():
-		}
 	}
-	close(queue)
+	fetching.Wait()
+	close(ready)
 	schedErr := <-scheduled
 	wg.Wait()
 	if err := dbErr.get(); err != nil {

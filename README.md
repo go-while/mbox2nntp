@@ -327,8 +327,11 @@ iafetch -status -db /data/iafetch.sqlite                # what the database reco
   unless `-tier` names it.
 - **Order and parallelism.** Items are taken by the list's `order` column and go to `-j`
   workers (default 64). A worker downloads the files of its item one after another, over one
-  connection, and takes the next item when done. The metadata of up to `-meta` items
-  (default 8) is fetched ahead meanwhile; the items are still queued in order.
+  connection, and takes the next item when done. Meanwhile the metadata of the next items
+  is fetched, `-meta` requests at once (default 8) for up to 4 × `-meta` items ahead. An
+  item goes to a worker as soon as its metadata is in, so the list order holds only roughly:
+  archive.org's metadata requests sometimes hang for minutes, and in strict order one of them
+  held up every item behind it.
 - **Being gentle.** Each item lives on two data nodes. A request goes to the less busy of
   the two, and waits while both have `-host-conns` requests out (default 4; `0` for no
   limit). Consecutive items are spread well: in any 256 of them no node holds more than 12,
