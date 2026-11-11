@@ -38,11 +38,12 @@ The output is written under a temporary name next to it, ".NAME.*.tmp",
 and renamed when complete.
 
 The mbox is mboxrd: each article starts with "From nobody DATE", DATE taken
-from its Date header, and body lines that start with "From " or ">From "
-get one more ">", as do lines starting "#! rnews ", which mbox2nntp's
-parser takes for the start of a message. To feed an archive to a server,
-give the .usenet file to mbox2nntp itself: it does not un-escape ">From "
-lines.
+from its Date header, and header and body lines that start with "From " or
+"#! rnews " after any number of ">" get one more ">" (mbox2nntp's parser
+takes both for the start of a message). Each article ends its header with
+"X-Mbox2nntp-Format: mboxrd": mbox2nntp then takes the ">" off again and
+drops the field, so the articles reach a server as exported. To feed an
+archive to a server, no mbox is needed: give the .usenet file to mbox2nntp.
 
 Flags:
 `

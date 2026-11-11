@@ -2,6 +2,10 @@
 
 Downloads the archive.org Usenet items.
 
+This page describes iafetch as on `main` (see the [CHANGELOG](../../CHANGELOG.md)). The
+iafetch of release v0.3.2 is older: there `-j` counts files (default 4), and `-host-conns`,
+`-item-conns`, `-piece`, `-conns`, `-meta` and `-nodes` do not exist yet.
+
 `iafetch` downloads the items of [`archive.org/import-order.csv`](../../archive.org/import-order.csv)
 (or any CSV with an `identifier` column) in list order, several items at a time, to
 `DIR/ITEM/FILE`, for [mbox2nntp](../../README.md) to import. A SQLite database records every file it downloaded and the state of
@@ -13,7 +17,7 @@ the next run goes on with the items after them.
 
 ```
 go -C cmd/iafetch build -o ../../iafetch .
-iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
+iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big (see below)
 iafetch -tier A archive.org/import-order.csv            # the early era first
 iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
 iafetch -j 512 -meta 32 -o /data/ia archive.org/import-order.csv  # a whole 1 Gbit/s line
@@ -67,8 +71,8 @@ the repository root.
   file that already exists under its name is checked by md5 and kept if right; a different
   file there is an error and is never replaced.
 - **The database** (`-db`, default `./iafetch.sqlite`) has a table `items` (identifier,
-  order, tier, list, status, files, bytes, note), a table `files` (identifier, name,
-  size, md5, path, time) and a table `pieces` (identifier, name, piece size, piece) for files
+  ord, tier, list, status, files, bytes, note, updated), a table `files` (identifier, name,
+  size, md5, path, done_at) and a table `pieces` (identifier, name, piece size, piece) for files
   being fetched in pieces, emptied when each is done. `path` is as given by `-o`: give an
   absolute `-o` when other programs read the database. An item is `done`, `incomplete` (a file failed: the next run gets
   what is missing), `dark` (taken down on archive.org), `missing` (no such item) or `empty`
@@ -76,6 +80,17 @@ the repository root.
   `-retry-unavailable`. To fetch an item again, delete its rows:
   `sqlite3 iafetch.sqlite "DELETE FROM items WHERE identifier='X'; DELETE FROM files WHERE identifier='X'"`.
   Keep the database outside the download directory if files are moved from there in bulk.
+- **An item's row in `items` is written when the item ends.** While it downloads, its
+  finished files are already in `files`, but it has no `items` row yet: join with a LEFT
+  JOIN to count them.
+- **`done` is per item, not per filter.** An item fetched with `-include` or `-exclude` is
+  `done` once the chosen files are in, or `empty` if none matched, and a later run without
+  the filter skips it. To get its other files, delete its `items` row (or use
+  `-retry-unavailable` for an `empty` one).
+- **`-n` shows the list's sizes.** It adds up the `item_size` column of the CSV, which is
+  archive.org's size of the whole item: with the files archive.org makes itself and the old
+  versions under `history/`, which iafetch does not download. The real download is smaller;
+  for the archive.org list, 7.95 TB against the 10.2 TB `-n` shows.
 
 ## Items not on archive.org
 

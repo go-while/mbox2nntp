@@ -75,7 +75,7 @@ mbox2nntp [flags] -dry-run INPUT
 |---|---|---|
 | `-server HOST:PORT` | (required) | the NNTP server; not needed with `-dry-run` |
 | `-workers N` | `1` | parallel connections |
-| `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked, in a new `.mbox2nntp-*` directory per run |
+| `-tmpdir DIR` | `.` | where `.gz`, `.zip` and `.7z` inputs are unpacked, in a new `.mbox2nntp-*` directory per run; DIR must exist |
 | `-7z PATH` | `7z`, `7zz` or `7za` | the 7-Zip program for `.7z` inputs |
 | `-zstd PATH` | `zstd` | the zstd program for UAT archives |
 | `-xz PATH` | `xz`, else 7-Zip | the xz program for `.usenet.xz` inputs |
@@ -87,6 +87,7 @@ mbox2nntp [flags] -dry-run INPUT
 | `-max-tries N` | `10` | tries per article after a `436` or a lost connection |
 | `-prehash` | on | send `IHAVE <msgid> <sha256-of-msgid>`; `-prehash=false` sends plain `IHAVE <msgid>` |
 | `-lax-msgid` | on | accept loosely formed Message-IDs |
+| `-version` | | print the version and exit |
 
 Examples:
 
@@ -280,7 +281,7 @@ binaries, `patch*`, and names containing `)`.
 The summary line at the end:
 
 ```
-Done sending. 1465/1467 dup=0 e437=2 err=0 filter=0 dropped=0 binary=0
+Done sending. 1465/1467 dup=0 e437=2 err=0 filter=0 dropped=61 binary=0
 ```
 
 That is sent out of total, then duplicates, rejections and errors. In a dry run, `sent`
@@ -292,13 +293,15 @@ and none offered: that more likely means a separator shape the parser does not k
 parser reports per file:
 
 ```
-[iterateMbox] Done read mbox file='...' msgNumber=1467 skipped=0 no-msgid=0 empty=0 binary=0 too-big=0 near-misses=0 stopped-early=false last-err=<nil>
+[iterateMbox] Done read mbox file='...' msgNumber=1528 skipped=0 no-msgid=4 empty=57 binary=0 too-big=0 near-misses=0 stopped-early=false last-err=<nil>
 ```
 
 - `skipped`: malformed messages the parser stepped over. The rest of the file is still
   read.
 - `no-msgid`, `empty`: messages without a Message-ID, or without a body. With `skipped`
-  they make up `dropped`.
+  they make up `dropped`. Each message without a body is also logged as
+  `ERROR head=N body=0 msgid='...'`: that is this count, not a failure. Most are cancel
+  control messages, or posts whose text the archive lost.
 - `binary`: yEnc articles left out (see `-keep-binary`).
 - `too-big`: articles with a body over 1 MiB, not sent, and counted as `e437`.
 - `stopped-early=true`: the parser lost its place before the end of the file, or a read

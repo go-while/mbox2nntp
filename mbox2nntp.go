@@ -1017,7 +1017,11 @@ func main() {
 
 	if DRYRUN {
 		// nothing was sent, so nothing is done
-		log.Printf("dry run: '%s' not marked done", mboxfileZ)
+		name := mboxfileZ
+		if name == "" {
+			name = mboxfile // directory mode
+		}
+		log.Printf("dry run: '%s' not marked done", name)
 	} else if is_zip || is_zip7 || is_gzp || is_bag || uatsuffix != "" {
 		if tnntperr == 0 {
 			mvmbox(mboxfileZ)

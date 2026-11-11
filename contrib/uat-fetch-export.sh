@@ -35,9 +35,10 @@ IA_ITEM=usenet-uat-pc-games
 IA_URL=https://archive.org/download/$IA_ITEM/
 USER_AGENT="uat-fetch-export.sh (mbox2nntp; one request at a time)"
 
-# What uatexport output takes per byte of archive, measured on 7 groups
-# from both sources (see cmd/uatexport/README.md): .usenet unpacked 1.9, .mbox 2.5,
-# .mbox.gz 0.55 (level 1: 0.65). In percent.
+# What uatexport output takes per byte of archive, in percent. Measured on
+# 7 groups from both sources (cmd/uatexport/README.md): .usenet unpacked
+# 1.9, .mbox 2.4, .mbox.gz 0.56 (level 1: 0.64); the values here are a
+# little higher, so the space estimate errs high.
 PCT_USENET=195
 PCT_MBOX=255
 PCT_GZ=57

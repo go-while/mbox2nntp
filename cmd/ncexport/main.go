@@ -56,9 +56,11 @@ copy). A group a tarball holds in several places is appended to, gzipped as
 one more gzip member.
 
 The mbox is mboxrd: each article starts with "From nobody DATE", DATE taken
-from its Date header, and body lines that start with "From " or ">From "
-get one more ">", as do lines starting "#! rnews ", which mbox2nntp's
-parser takes for the start of a message.
+from its Date header, and header and body lines that start with "From " or
+"#! rnews " after any number of ">" get one more ">" (mbox2nntp's parser
+takes both for the start of a message). Each article ends its header with
+"X-Mbox2nntp-Format: mboxrd": mbox2nntp then takes the ">" off again and
+drops the field, so the articles reach a server as stored.
 
 Flags:
 `
