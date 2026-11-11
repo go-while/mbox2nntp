@@ -4,10 +4,15 @@ Feeds Usenet archives in mbox form to an NNTP server, one article at a time, wit
 `IHAVE`. It was written to load the archive.org Usenet collections (`gna-clari`,
 `usenet-clari`, the `usenet-*` and `FULL-USENET-BACKUP-*` items) into INN2. It also reads
 the archives of the [Usenet Archive Toolkit](https://github.com/wolfpld/usenetarchive)
-(see [UAT archives](#uat-archives)), and `ncexport` turns the NewsCache spools of the
-`textusenet-backup` items into mbox files (see [NewsCache spools](#newscache-spools-textusenet-backup)).
-`iafetch` downloads the archive.org items in import order and remembers what it got (see
-[Downloading from archive.org](#downloading-from-archiveorg)).
+(see [UAT archives](#uat-archives)).
+
+Three more tools come with it, each with its own README:
+
+- [`uatexport`](cmd/uatexport/README.md) writes a UAT archive out as an mbox, or one file per article;
+- [`ncexport`](cmd/ncexport/README.md) turns the NewsCache spools of the `textusenet-backup`
+  items into mbox files;
+- [`iafetch`](cmd/iafetch/README.md) downloads the archive.org items in import order and
+  remembers what it got.
 
 Each run takes one input: an mbox, a compressed mbox, a UAT archive, or a directory of
 article files.
@@ -156,221 +161,32 @@ in it.
 already holds the original from another archive answers `435`, and keeps the original; a
 server that gets the UAT copy first keeps the rewritten one.
 
-To write a UAT archive out as an mbox file or as one file per article, for use elsewhere,
-there is `uatexport` (`go build ./cmd/uatexport`):
-
-```
-uatexport alt.pl.fan.gophi.usenet.xz                     # writes alt.pl.fan.gophi.mbox
-uatexport -gzip alt.pl.fan.gophi.usenet.xz               # writes alt.pl.fan.gophi.mbox.gz
-uatexport -gzip=9 -o /srv/mbox/gophi.mbox.gz alt.pl.fan.gophi.usenet.xz
-uatexport -format dir -o spool/ rec.games.rogue.usenet.7z
-uatexport -raw ...                                       # as the toolkit stores them
-```
-
-`-gzip` compresses the mbox in-process (compress/gzip) at level 6; `-gzip=N` sets the
-level, 1 to 9. mbox2nntp reads the `.mbox.gz` as it reads any other. uatexport never
-replaces an existing output: it writes to a hidden temporary name next to it
-(`.NAME.*.tmp`) and renames it when complete, so a stopped run leaves no output that
-looks finished. Interrupted with Ctrl-C, it removes its temporary files.
-
-**Storage.** Measured on 7 groups (3 from nereid, 4 from archive.org, 56 MB of archives),
-per byte of `.usenet.xz`/`.7z`: the unpacked `.usenet` takes 1.9, the `.mbox` 2.4,
-the `.mbox.gz` 0.56 (level 1: 0.64, level 9: 0.54), and `.mbox.xz` 0.34. A `.mbox.gz`
-is smaller than the archive because the archive also holds the toolkit's search
-indexes. `-gzip` makes an export about 1.7 times slower than a plain one (`-gzip=9`: 2.5
-times). Reading the `.mbox.gz` with mbox2nntp is as fast as reading the archive.
-
-To feed a server you need no mbox at all: give mbox2nntp the archive. Keep the
-`.usenet.xz`/`.7z` files: they are the toolkit's own data. An exported mbox works as input
-too (see below), but it holds only the articles, re-encoded.
-
-To download a whole collection and export every group, there is
-[`contrib/uat-fetch-export.sh`](contrib/uat-fetch-export.sh) (bash and curl; `ia` or `jq`
-for archive.org). It fetches the nereid directory listing and the archive.org metadata
-(one request each), downloads the archives one at a time, with a pause between files
-(`-p`, 2 s), an optional bandwidth cap (`-r 2M`, curl `--limit-rate`) and retries,
-resumes interrupted downloads, and checks them (archive.org by md5, nereid by size and
-`xz -t`). Then it runs uatexport on each, to `GROUP.mbox.gz` by default. Downloads and
-exports that are complete are skipped, so it can be stopped and run again.
-
-```
-go build -o uatexport ./cmd/uatexport
-contrib/uat-fetch-export.sh -n                          # what it would do, with sizes
-contrib/uat-fetch-export.sh -s archive --sort size -l 3 # the 3 smallest archive.org groups
-contrib/uat-fetch-export.sh -s nereid -m '^pl\.comp\.' -d /srv/uat -o /srv/mbox -r 5M
-contrib/uat-fetch-export.sh --download-only             # only the archives
-contrib/uat-fetch-export.sh -h                          # all options
-```
-
-For both collections (372 groups, 45.8 GB of archives) expect about 25 GB of
-`.mbox.gz` (115 GB as plain `.mbox`), and room to unpack the largest archive,
-`pl.soc.polityka` (1.9 GB, about 3.5 GB unpacked). `--delete-archive` removes each archive
-once its group is exported.
-
-Other programs can read UAT archives with the package `github.com/go-while/mbox2nntp/uat`
-(standard library only, plus the zstd program); `uat/uattest` writes small archives for
-their tests.
-
-The mbox is mboxrd: header and body lines starting `From ` or `#! rnews ` after any number
-of `>` get one more `>` (mbox2nntp's parser takes both for the start of a message). Each article has a
-`From nobody DATE` line that mbox2nntp's parser reads, and ends its header with
-`X-Mbox2nntp-Format: mboxrd`. The articles get the same changes as above. mbox2nntp reads
-such an mbox back exactly: the field makes it take one `>` off those lines again, and it
-is not sent. An exported directory works as a `DIR` input.
+To write a UAT archive out as an mbox file or as one file per article, see
+[uatexport](cmd/uatexport/README.md).
 
 ### NewsCache spools (textusenet-backup)
 
-The archive.org `textusenet-backup_*` items (30 items, 977 GB) hold `.tar.gz` files, one per
-hierarchy (`97comp.tar.gz`, `rainbow.tar.gz`, ...), each the spool of a
-[NewsCache](https://github.com/hstraub/NewsCache) server: one directory per newsgroup
-(`rainbow/test` for `rainbow.test`) with a `.db` file and `.artN` files. `ncexport` writes
-such a spool out as one mbox per group, in a directory:
+The archive.org `textusenet-backup_*` items hold the spools of
+[NewsCache](https://github.com/hstraub/NewsCache) servers as `.tar.gz` files. mbox2nntp does
+not read them itself: [ncexport](cmd/ncexport/README.md) writes such a spool out as one mbox
+per group, which mbox2nntp then feeds, one run per file.
 
 ```
-go build -o ncexport ./cmd/ncexport
-ncexport -gzip rainbow.tar.gz                           # rainbow/rainbow.test.mbox.gz, ...
-curl -sL https://archive.org/download/textusenet-backup_9/97comp.tar.gz |
-    ncexport -gzip -o 97comp -                          # straight from the download
-ncexport -o comp /var/spool/newscache/comp              # an unpacked spool directory
-ncexport -gzip -max-db 64G -tmpdir /big/tmp r.tar.gz    # .db files up to 64 GiB
+ncexport -gzip rainbow.tar.gz
+for f in rainbow/*.mbox.gz; do mbox2nntp -server localhost:119 "$f"; done
 ```
-
-A tarball is read as a stream in one pass, and it can come from a pipe. Nothing is
-unpacked to disk, except a `.db` over 1 MiB, which goes to a temporary file while it is
-read: in `-tmpdir`, by default the output's directory, not the system's temporary
-directory, which is often small or in RAM. It needs space for the largest `.db`. The
-output directory is built under a temporary name and appears under its own only when
-complete, as with uatexport, and an existing one is never replaced.
-
-- **Where the articles are.** NewsCache stores an article of 15 KB or less inside the `.db`
-  and a bigger one in `.artN`. The server behind the backup ran a modified NewsCache that
-  put every article in an `.artN` file. ncexport reads both.
-- **What is changed.** NewsCache keeps an article as the server sent it: CRLF line ends and
-  leading dots doubled. ncexport turns line ends into LF and doubled dots back into single
-  ones. Nothing else changes. A few damaged yEnc articles also have lines with a single
-  leading dot, which cannot come from doubling: those lines are kept as they are, and the
-  summary counts the articles.
-- **One mbox per group.** `GROUP.mbox`, or `GROUP.mbox.gz` with `-gzip`. In a file name,
-  characters other than letters, digits and `._+-` become `_`. Only one group file is open
-  at a time. A group the tarball holds in several places (51 of 352 in `sci.tar.gz`) is
-  appended to, gzipped as one more gzip member, which gzip readers (mbox2nntp's, `zcat`)
-  read as one stream. The mbox is mboxrd, with `From nobody DATE` taken from the Date
-  header, as uatexport writes it.
-- **Crossposts.** An article crossposted to several groups is in each group's directory,
-  and goes to each group's mbox. Within one group's mbox an article is written once, the
-  first time its Message-ID turns up; `-dedup=false` writes every copy. Memory for that is
-  bounded by the largest group.
-- **Order.** A tarball's articles are written in the tarball's order, a directory's group by
-  group and by article number.
-- **The summary.** It counts the articles, the group files, the groups, the `.art` files
-  and the articles inside `.db` files. It also counts duplicates skipped within a group,
-  and the articles a `.db` lists without an `.art` file.
-- **Listed but not stored: `-missing FILE`.** A group's `.db` lists every article by its
-  overview line, but NewsCache stored a crossposted article once, under one of its groups.
-  So most listed articles without an `.art` file are in the export after all, from another
-  group. In `sci.tar.gz` (textusenet-backup_s) that is 2,003,281 of 2,136,368. `-missing
-  FILE` looks each one up by Message-ID and writes the others, the articles that are
-  really missing, to FILE: one line each with group, number, date, subject, from and
-  Message-ID, tab-separated, to find them in other archives. The summary then splits the
-  count. Until the end, the overview fields of the listed articles wait in a temporary file
-  in `-tmpdir`, about 150 bytes each, as a tarball holds a group's `.db` before its
-  articles, and every exported Message-ID is kept in memory for the lookup (about
-  100 bytes each). Articles crossposted to a hierarchy in another tarball count as
-  missing.
-- **The `.db`.** It is read one record at a time, never whole: the table of record offsets
-  through a buffer, then each record where the table points. NewsCache places records and
-  the table anywhere in the file, so it cannot be read front to back. A big group's `.db`
-  costs time, not memory.
-- **Size limits.** An article over 1 MiB, as an `.artN` file or inside a `.db`, is skipped
-  with a warning and counted in the summary. Text articles are mostly under 16 KB, and
-  servers rarely take one over 256 KB. uatexport skips UAT messages over 1 MiB the same
-  way.
-- **`-max-db SIZE`.** A `.db` over it (default `4G`, the most a 32-bit NewsCache can
-  address) is skipped, and the summary says how many, as their articles are then missing.
-  A 64-bit NewsCache has no such bound: raise it (`-max-db 64G`), or `-max-db 0` for no
-  limit. A big `.db` costs time and, from a tarball, temporary disk space, not memory.
-
-Checked on `97comp.tar.gz` (757 articles) and `rainbow.tar.gz` (518 articles from 616
-files in 34 groups). Every article mbox2nntp's parser reads back from the mbox equals the
-stored one, with line ends and dots undone. Then give each group's `.mbox.gz` to
-mbox2nntp, one run per file (`for f in 97comp/*.mbox.gz; do mbox2nntp -server … "$f"; done`);
-each is renamed `.done` on its own. Expect it to skip articles with an empty body (24 in
-`97comp`), which some spam has, and yEnc binaries unless `-keep-binary` is given.
-
-Other programs can read NewsCache spools with the package
-`github.com/go-while/mbox2nntp/newscache` (standard library only); `newscache/newscachetest`
-builds `.db` files for their tests.
 
 ### Downloading from archive.org
 
-`iafetch` downloads the items of [`archive.org/import-order.csv`](archive.org/import-order.csv)
-(or any CSV with an `identifier` column) in list order, several items at a time, to
-`DIR/ITEM/FILE`. A SQLite database records every file it downloaded and the state of
-every item. **An item recorded as done is skipped from then on without asking archive.org,
-whether or not its files are still there**, so imported files can be moved or deleted and
-the next run goes on with the items after them.
+[iafetch](cmd/iafetch/README.md) downloads the archive.org items of
+[`archive.org/import-order.csv`](archive.org/import-order.csv) in import order, many items at
+once but gently, one connection per item. A SQLite database remembers what it got, so it
+resumes after a stop, and imported files can be moved away.
 
 ```
-go -C cmd/iafetch build -o ../../iafetch .
 iafetch -n archive.org/import-order.csv                 # dry run: what would come, how big
-iafetch -tier A archive.org/import-order.csv            # the early era first
-iafetch -j 8 -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
-iafetch -j 512 -meta 32 -o /data/ia archive.org/import-order.csv  # a whole 1 Gbit/s line
-iafetch -status -db /data/iafetch.sqlite                # what the database records
+iafetch -o /data/ia -db /data/iafetch.sqlite archive.org/import-order.csv
 ```
-
-- **What is downloaded.** The files of the upload, by the item's archive.org metadata: not
-  the files archive.org makes itself (`_meta.xml`, `_files.xml`, `_meta.sqlite`,
-  `.torrent`), nor the replaced versions it keeps under `history/` (most
-  `FULL-USENET-BACKUP-*` items have one, as big as the current file). `-include` and `-exclude` choose among them by regexp, `-tier`, `-list`,
-  `-match`, `-from`, `-to` and `-limit` choose the items. Tier `X` (not Usenet) is left out
-  unless `-tier` names it.
-- **Order and parallelism.** Items are taken by the list's `order` column and go to `-j`
-  workers (default 64). A worker downloads the files of its item one after another, over one
-  connection, and takes the next item when done. Meanwhile the metadata of the next items
-  is fetched, `-meta` requests at once (default 8) for up to 4 × `-meta` items ahead. An
-  item goes to a worker as soon as its metadata is in, so the list order holds only roughly:
-  archive.org's metadata requests sometimes hang for minutes, and in strict order one of them
-  held up every item behind it.
-- **Being gentle.** Each item lives on two data nodes. A request goes to the less busy of
-  the two, and waits while both have `-host-conns` requests out (default 4; `0` for no
-  limit). Consecutive items are spread well: in any 256 of them no node holds more than 12,
-  out of 318 nodes.
-- **Speed.** archive.org gives one connection well under 1 MB/s, so a fast line needs a few
-  hundred items at once. `-item-conns N` (default 1) gives an item N connections: a file
-  larger than `-piece` MB (default 32; `0` for never) is then fetched in pieces of that
-  size, N side by side, each written to its place in the `.part` file. `-conns` caps the
-  connections in all (default `-j` times `-item-conns`).
-  Files come straight from the data nodes the item's metadata names (`workable_servers`,
-  `dir`): `archive.org/download/` only redirects there, and with many downloads at once
-  those redirects are what limits the rate. `/download/` is asked when a node does not
-  have the file, or once each node has failed; `-nodes=false` always goes through it.
-  Requests use HTTP/1.1, one TCP connection each: over the nodes' HTTP/2 the requests to one
-  node shared one connection and its speed. Measured on a 1 Gbit/s line: about 50 MB/s
-  through `/download/`; from the nodes 72 MB/s over HTTP/2 and 116 MB/s over HTTP/1.1, with
-  `-j 512 -meta 32`.
-- **Checking.** A file is written to `FILE.part` and renamed to `FILE` only when its size
-  and md5 match the metadata. A stopped run (Ctrl-C) leaves `.part` files, which the next
-  run resumes with a range request; for a file fetched in pieces, the finished pieces are
-  recorded in the database and only the missing ones are fetched. Failed requests, including the 500s archive.org
-  sometimes answers, are retried with a pause of 5 s doubling up to 5m20s (`-retries`). So
-  is a request that gets no data for 2 minutes (`-stall`), resuming the part. A
-  file that already exists under its name is checked by md5 and kept if right; a different
-  file there is an error and is never replaced.
-- **The database** (`-db`, default `./iafetch.sqlite`) has a table `items` (identifier,
-  order, tier, list, status, files, bytes, note), a table `files` (identifier, name,
-  size, md5, path, time) and a table `pieces` (identifier, name, piece size, piece) for files
-  being fetched in pieces, emptied when each is done. `path` is as given by `-o`: give an
-  absolute `-o` when other programs read the database. An item is `done`, `incomplete` (a file failed: the next run gets
-  what is missing), `dark` (taken down on archive.org), `missing` (no such item) or `empty`
-  (no files to download). `dark`, `missing` and `empty` items are skipped until
-  `-retry-unavailable`. To fetch an item again, delete its rows:
-  `sqlite3 iafetch.sqlite "DELETE FROM items WHERE identifier='X'; DELETE FROM files WHERE identifier='X'"`.
-  Keep the database outside the download directory if files are moved from there in bulk.
-
-Some items in the list are taken down on archive.org and not in the list at all, such as
-`textusenet-backup_a`, `_c`, `_e`, `_g`, `_h`, `_n` and `_u`; `textusenet-backup_0` and
-`_f` are listed but have no files and are recorded as `empty`.
 
 ### The old positional form
 

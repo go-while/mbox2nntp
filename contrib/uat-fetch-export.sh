@@ -36,7 +36,7 @@ IA_URL=https://archive.org/download/$IA_ITEM/
 USER_AGENT="uat-fetch-export.sh (mbox2nntp; one request at a time)"
 
 # What uatexport output takes per byte of archive, measured on 7 groups
-# from both sources (see the README): .usenet unpacked 1.9, .mbox 2.5,
+# from both sources (see cmd/uatexport/README.md): .usenet unpacked 1.9, .mbox 2.5,
 # .mbox.gz 0.55 (level 1: 0.65). In percent.
 PCT_USENET=195
 PCT_MBOX=255

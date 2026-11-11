@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the release archives into dist/: mbox2nntp, uatexport, ncexport and iafetch for each
-# target, with README.md, CHANGELOG.md and LICENSE, plus a SHA-256 checksum file.
+# target, with README.md (and cmd/*/README.md), CHANGELOG.md and LICENSE, plus a SHA-256
+# checksum file.
 # Used by .github/workflows/release.yml; runs the same on a Linux machine.
 #
 #   .github/release-build.sh v0.1.0
@@ -33,6 +34,11 @@ for target in $targets; do
 			go -C "$mod" build -trimpath -ldflags "$ldflags" -o "$PWD/$dir/$bin$ext" "$pkg"
 	done
 	cp README.md CHANGELOG.md LICENSE "$dir/"
+	# at the same paths, so the links between the READMEs work
+	for c in uatexport ncexport iafetch; do
+		mkdir -p "$dir/cmd/$c"
+		cp "cmd/$c/README.md" "$dir/cmd/$c/"
+	done
 	if [[ $goos == windows ]]; then
 		(cd dist && zip -q -r "$name.zip" "$name")
 	else
